@@ -18,6 +18,8 @@ import { Camera } from "./Camera";
 import { THEME } from "./theme";
 import { Minimap } from "../Minimap/Minimap";
 import { soundManager } from "../../audio/SoundManager";
+import { StatsHUD } from "../StatsHUD/StatsHUD";
+import { HeartbeatHUD } from "../HeartbeatHUD/HeartbeatHUD";
 
 export function DungeonMap() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -43,6 +45,8 @@ export function DungeonMap() {
   const agents = useGameState((s) => s.agents);
   const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
+  const toolFlows = useGameState((s) => s.toolFlows);
+  const errorPropagations = useGameState((s) => s.errorPropagations);
 
   // Initialize PixiJS — wait for container to have real dimensions
   useEffect(() => {
@@ -277,6 +281,17 @@ export function DungeonMap() {
         room.position.set(ln.x - 90, ln.y - 35);
         const aa = agents.get(dn.assignee ?? "");
         room.update(dn.status, aa?.name, aa?.role);
+        // File attention heatmap — rooms glow by agent activity
+        room.setHeat(aa?.activityHeat ?? 0);
+
+        // Error propagation fire — rooms glow red when errors cascade
+        for (const prop of errorPropagations) {
+          if (prop.intensity < 0.05) continue;
+          if (prop.affectedNodes.includes(ln.nodeId)) {
+            const isSource = prop.sourceNodeId === ln.nodeId;
+            room.setFire(isSource ? prop.intensity : prop.intensity * 0.5);
+          }
+        }
       }
       for (const [id, r] of rooms) {
         if (!seen.has(id)) { world.removeChild(r); r.destroy(); rooms.delete(id); }
@@ -285,13 +300,88 @@ export function DungeonMap() {
       // Corridors — recreate (cheap)
       for (const c of corridorsRef.current) { world.removeChild(c); c.destroy(); }
       corridorsRef.current = [];
+      const corridorMap = new Map<string, Corridor>(); // "from:to" → corridor
+      const connectedPairs = new Set<string>(); // track which node pairs have corridors
+
+      // DAG-edge corridors
       for (const edge of layout.edges) {
         const c = new Corridor(edge.from, edge.to);
         const fd = dag.nodes.find((n) => n.nodeId === edge.from.nodeId);
         const td = dag.nodes.find((n) => n.nodeId === edge.to.nodeId);
         if (fd && td) c.update(fd.status, td.status, false);
         corridorsRef.current.push(c);
+        corridorMap.set(`${edge.from.nodeId}:${edge.to.nodeId}`, c);
+        corridorMap.set(`${edge.to.nodeId}:${edge.from.nodeId}`, c);
+        connectedPairs.add(`${edge.from.nodeId}:${edge.to.nodeId}`);
+        connectedPairs.add(`${edge.to.nodeId}:${edge.from.nodeId}`);
         world.addChildAt(c, 1);
+      }
+
+      // Proximity corridors — connect adjacent rooms that have no DAG edge.
+      // Sort by layer then index, connect consecutive nodes in the same layer.
+      const sorted = [...layout.nodes].sort((a, b) => a.layer - b.layer || a.index - b.index);
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const a = sorted[i];
+        const b = sorted[i + 1];
+        if (a.layer !== b.layer) continue; // only same-layer neighbors
+        const key = `${a.nodeId}:${b.nodeId}`;
+        if (connectedPairs.has(key)) continue; // already have a DAG corridor
+        const c = new Corridor(a, b);
+        // Proximity corridors use default (dim) styling
+        corridorsRef.current.push(c);
+        corridorMap.set(key, c);
+        corridorMap.set(`${b.nodeId}:${a.nodeId}`, c);
+        connectedPairs.add(key);
+        connectedPairs.add(`${b.nodeId}:${a.nodeId}`);
+        world.addChildAt(c, 1);
+      }
+      // Also connect across layers if there are multiple layers with no edges
+      // (e.g., orphan nodes in different layers)
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          const a = sorted[i];
+          const b = sorted[j];
+          if (a.layer === b.layer) continue; // already handled above
+          // Only connect if neither node has ANY corridor yet
+          const aHas = [...connectedPairs].some((k) => k.startsWith(a.nodeId + ":"));
+          const bHas = [...connectedPairs].some((k) => k.startsWith(b.nodeId + ":"));
+          if (aHas && bHas) continue;
+          const key = `${a.nodeId}:${b.nodeId}`;
+          if (connectedPairs.has(key)) continue;
+          const c = new Corridor(a, b);
+          corridorsRef.current.push(c);
+          corridorMap.set(key, c);
+          corridorMap.set(`${b.nodeId}:${a.nodeId}`, c);
+          connectedPairs.add(key);
+          connectedPairs.add(`${b.nodeId}:${a.nodeId}`);
+          world.addChildAt(c, 1);
+          break; // one cross-layer connection per orphan is enough
+        }
+      }
+
+      // Apply tool flows to corridors — recent flows light up
+      const flowCutoff = Date.now() - 10000; // last 10s
+      for (const flow of toolFlows) {
+        if (flow.ts < flowCutoff) continue;
+        const key = `${flow.fromNodeId}:${flow.toNodeId}`;
+        const c = corridorMap.get(key);
+        if (c) c.addFlow(flow.agentRole);
+      }
+
+      // Apply error propagation fire to corridors
+      for (const prop of errorPropagations) {
+        if (prop.intensity < 0.05) continue;
+        for (let i = 0; i < prop.affectedNodes.length - 1; i++) {
+          const key = `${prop.affectedNodes[i]}:${prop.affectedNodes[i + 1]}`;
+          const c = corridorMap.get(key);
+          if (c) c.ignite(prop.intensity);
+          // Also ignite from source to each affected
+          if (prop.sourceNodeId) {
+            const sKey = `${prop.sourceNodeId}:${prop.affectedNodes[i]}`;
+            const sc = corridorMap.get(sKey);
+            if (sc) sc.ignite(prop.intensity * 0.7);
+          }
+        }
       }
 
       // Helper: spawn creatures near an agent
@@ -334,6 +424,11 @@ export function DungeonMap() {
         }
         sp.setName(agent.name);
         sp.update(agent.currentAction, agent.isBlocked ?? false, agent.isComplete ?? false, agent.currentDetail);
+
+        // Detect level-up
+        if (agent.level > agent.prevLevel) {
+          sp.triggerLevelUp(agent.level);
+        }
 
         // Spawn loot effect when agent newly completes
         if (agent.isComplete && !completedAgentsRef.current.has(agent.agentId)) {
@@ -462,7 +557,53 @@ export function DungeonMap() {
         const dn = dag.nodes.find((n) => n.assignee === agent.agentId);
         if (dn) {
           const ln = layout.nodes.find((n) => n.nodeId === dn.nodeId);
-          if (ln) sp.moveTo(ln.x, ln.y);
+          if (ln) {
+            // Check if agent moved to a different room — walk along corridor
+            const prevNode = prevActionsRef.current.get("node:" + agent.agentId);
+            if (prevNode && prevNode !== dn.nodeId) {
+              const prevLn = layout.nodes.find((n) => n.nodeId === prevNode);
+              if (prevLn) {
+                // Build bezier waypoints from old room to new room
+                const waypoints: Array<[number, number]> = [];
+                const steps = 20;
+                const x1 = prevLn.x;
+                const y1 = prevLn.y;
+                const x2 = ln.x;
+                const y2 = ln.y;
+                const midX = (x1 + x2) / 2;
+                for (let i = 0; i <= steps; i++) {
+                  const t = i / steps;
+                  const u = 1 - t;
+                  const px = u * u * u * x1 + 3 * u * u * t * midX + 3 * u * t * t * midX + t * t * t * x2;
+                  const py = u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2;
+                  waypoints.push([px, py]);
+                }
+                sp.setWanderPath(waypoints);
+              }
+            }
+            prevActionsRef.current.set("node:" + agent.agentId, dn.nodeId);
+
+            // Tell agent about neighboring rooms it can wander to
+            // Include both DAG edges AND proximity corridors
+            const neighborNodes: Array<{ nodeId: string; x: number; y: number }> = [];
+            const addedNeighbors = new Set<string>();
+            for (const key of connectedPairs) {
+              const [fromId, toId] = key.split(":");
+              let neighborId: string | null = null;
+              if (fromId === dn.nodeId) neighborId = toId;
+              if (toId === dn.nodeId) neighborId = fromId;
+              if (neighborId && !addedNeighbors.has(neighborId)) {
+                const nln = layout.nodes.find((n) => n.nodeId === neighborId);
+                if (nln) {
+                  neighborNodes.push({ nodeId: neighborId, x: nln.x, y: nln.y });
+                  addedNeighbors.add(neighborId);
+                }
+              }
+            }
+            sp.setNeighbors(neighborNodes);
+
+            sp.moveTo(ln.x, ln.y);
+          }
         }
       }
       for (const [id, sp] of sprites) {
@@ -475,7 +616,7 @@ export function DungeonMap() {
         }
       }
     },
-    [selectAgent]
+    [selectAgent, toolFlows, errorPropagations]
   );
 
   useEffect(() => { syncScene(dag, agents); }, [dag, agents, syncScene]);
@@ -516,6 +657,8 @@ export function DungeonMap() {
         camera={cameraRef.current}
         onClickWorld={handleMinimapClick}
       />
+      <StatsHUD />
+      <HeartbeatHUD />
     </div>
   );
 }

@@ -66,6 +66,10 @@ function thinkingText(detail?: string): string {
       return "Writing in grimoire...";
     case "CronCreate":
       return "Setting a timer...";
+    case "compacting memory":
+      return "Brain overloaded!";
+    case "awaiting permission":
+      return "Awaiting orders!";
     default:
       if (detail.startsWith("creating task:"))
         return `Planning: ${detail.slice(15).trim()}`;
@@ -95,6 +99,10 @@ function actionText(action: ActionType, detail?: string): string {
     case "shell":
       return detail ? `$ ${detail.slice(0, 20)}` : "Running shell...";
     case "network":
+      if (detail?.startsWith("summoning ")) {
+        const server = detail.slice(10).split(":")[0];
+        return `Summoning ${server}...`;
+      }
       return "Fetching...";
     case "thinking":
       return thinkingText(detail);

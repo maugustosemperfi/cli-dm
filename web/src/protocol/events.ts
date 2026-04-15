@@ -133,6 +133,16 @@ export interface DAGEdgeAdd {
   ts?: number;
 }
 
+// --- Agent stats (XP/Gold) ---
+
+export interface AgentStatsEvent {
+  type: "agent.stats";
+  agentId: string;
+  tokens?: number;
+  costUsd?: number;
+  ts: number;
+}
+
 // --- Raw output ---
 
 export interface RawStdout {
@@ -182,6 +192,7 @@ export type GameEvent =
   | AgentActive
   | AgentComplete
   | AgentError
+  | AgentStatsEvent
   | ActionStart
   | ActionEnd
   | BlockerHit

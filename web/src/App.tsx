@@ -6,11 +6,13 @@ import { DungeonMap } from "./components/DungeonMap/DungeonMap";
 import { StatusBar } from "./components/StatusBar/StatusBar";
 import { DAGPanel } from "./components/DAGPanel/DAGPanel";
 import { EventLog } from "./components/EventLog/EventLog";
+import { Timeline } from "./components/Timeline/Timeline";
+import { Transcript } from "./components/Transcript/Transcript";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/api/ws`;
 
-type RightTab = "terminals" | "tasks" | "log";
+type RightTab = "terminals" | "tasks" | "log" | "timeline" | "transcript";
 
 export function App() {
   const terminalRefs = useRef<Map<string, Terminal>>(new Map());
@@ -61,7 +63,7 @@ export function App() {
               background: "#1e1f22",
             }}
           >
-            {(["terminals", "tasks", "log"] as RightTab[]).map((tab) => (
+            {(["terminals", "tasks", "log", "timeline", "transcript"] as RightTab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -94,6 +96,8 @@ export function App() {
             )}
             {activeTab === "tasks" && <DAGPanel />}
             {activeTab === "log" && <EventLog />}
+            {activeTab === "timeline" && <Timeline />}
+            {activeTab === "transcript" && <Transcript />}
           </div>
         </div>
       </div>

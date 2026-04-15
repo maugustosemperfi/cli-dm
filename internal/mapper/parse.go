@@ -31,9 +31,11 @@ func ParseStreamLine(line []byte, agentID string) ([]ToolEvent, error) {
 		return parseAssistant(raw, agentID)
 	case "user":
 		return parseUser(raw, agentID)
+	case "system":
+		return parseSystem(raw, agentID)
 	case "permission-mode", "file-history-snapshot", "attachment",
 		"last-prompt", "custom-title", "agent-name",
-		"system", "queue-operation":
+		"queue-operation":
 		// Known non-actionable types — skip silently
 		return nil, nil
 	case "":
@@ -222,6 +224,59 @@ func extractToolResultContent(block map[string]any) string {
 		}
 	}
 	return result
+}
+
+// parseSystem handles "system" type JSONL entries — compaction, turn_duration, etc.
+func parseSystem(raw map[string]any, agentID string) ([]ToolEvent, error) {
+	subtype, _ := raw["subtype"].(string)
+	switch subtype {
+	case "compaction", "pre_compact":
+		// Context window is being compacted — "brain overloaded!"
+		return []ToolEvent{{
+			Kind:     ToolStart,
+			AgentID:  agentID,
+			ToolName: "__compact__",
+		}}, nil
+	case "stop_hook_summary":
+		// Turn ended — emit end event
+		return []ToolEvent{{
+			Kind:     ToolEnd,
+			AgentID:  agentID,
+			ToolName: "__thinking__",
+		}}, nil
+	default:
+		// turn_duration, etc. — no events needed
+		return nil, nil
+	}
+}
+
+// ExtractTokensFromMessage extracts usage data from an assistant message.
+// Returns (inputTokens, outputTokens, costUSD, ok).
+func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) {
+	// Check for usage field in the message or top-level
+	var usage map[string]any
+	if msg, _ := raw["message"].(map[string]any); msg != nil {
+		usage, _ = msg["usage"].(map[string]any)
+	}
+	if usage == nil {
+		usage, _ = raw["usage"].(map[string]any)
+	}
+	if usage == nil {
+		return 0, 0, 0, false
+	}
+
+	input, _ := usage["input_tokens"].(float64)
+	output, _ := usage["output_tokens"].(float64)
+
+	// Check for cost field
+	cost, _ := raw["costUSD"].(float64)
+	if cost == 0 {
+		if msg, _ := raw["message"].(map[string]any); msg != nil {
+			cost, _ = msg["costUSD"].(float64)
+		}
+	}
+
+	return int64(input), int64(output), cost, input > 0 || output > 0
 }
 
 // --- helpers ---

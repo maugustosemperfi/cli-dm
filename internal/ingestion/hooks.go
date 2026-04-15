@@ -234,16 +234,113 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 			IsStart: true,
 		}
 
-	case "Stop", "SubagentStop":
+	case "Stop", "SessionEnd":
 		return &mapper.ToolEvent{
 			Kind:    mapper.SessionLife,
 			AgentID: agentID,
 			IsStart: false,
 		}
 
+	case "SubagentStart":
+		// Spawn a new subagent character
+		subAgentID := stringFromMap(payload, "agent_id")
+		if subAgentID == "" {
+			subAgentID = fmt.Sprintf("%s-sub-%d", agentID, h.nextSubID(agentID))
+		}
+		subName := stringFromMap(payload, "agent_name")
+		if subName == "" {
+			subName = stringFromMap(payload, "description")
+		}
+		if subName == "" {
+			subName = "subagent"
+		}
+		h.spawnSubagent(subAgentID, subName)
+		return &mapper.ToolEvent{
+			Kind:    mapper.SessionLife,
+			AgentID: subAgentID,
+			IsStart: true,
+		}
+
+	case "SubagentStop":
+		subAgentID := stringFromMap(payload, "agent_id")
+		if subAgentID == "" {
+			return nil
+		}
+		return &mapper.ToolEvent{
+			Kind:    mapper.SessionLife,
+			AgentID: subAgentID,
+			IsStart: false,
+		}
+
+	case "PreCompact":
+		return &mapper.ToolEvent{
+			Kind:     mapper.ToolStart,
+			AgentID:  agentID,
+			ToolName: "__compact__",
+		}
+
+	case "PermissionRequest":
+		return &mapper.ToolEvent{
+			Kind:     mapper.ToolStart,
+			AgentID:  agentID,
+			ToolName: "__permission__",
+			Input: map[string]any{
+				"tool": stringFromMap(payload, "tool_name"),
+			},
+		}
+
+	case "UserPromptSubmit":
+		return &mapper.ToolEvent{
+			Kind:     mapper.ToolStart,
+			AgentID:  agentID,
+			ToolName: "__user_input__",
+		}
+
+	case "Notification":
+		// Notifications are informational — treat as thinking
+		msg := stringFromMap(payload, "message")
+		if msg == "" {
+			msg = stringFromMap(payload, "notification_type")
+		}
+		return &mapper.ToolEvent{
+			Kind:     mapper.ToolStart,
+			AgentID:  agentID,
+			ToolName: "__responding__",
+			Input:    map[string]any{"text_length": len(msg)},
+		}
+
 	default:
 		h.logger.Debug("unknown hook type", "type", hookType)
 		return nil
+	}
+}
+
+// nextSubID returns an incrementing subagent counter for a given parent agent.
+func (h *HookReceiver) nextSubID(parentID string) int {
+	h.nextID++
+	return h.nextID
+}
+
+// spawnSubagent emits a spawn event for a new subagent character.
+func (h *HookReceiver) spawnSubagent(subAgentID, name string) {
+	h.mu.Lock()
+	roles := []protocol.AgentRole{
+		protocol.RoleRogue, protocol.RoleMage, protocol.RoleRanger,
+		protocol.RoleCleric, protocol.RoleBard,
+	}
+	role := roles[h.nextID%len(roles)]
+	h.agentInfo[subAgentID] = agentMeta{Name: name, Role: role}
+	h.mu.Unlock()
+
+	ev, err := protocol.NewEvent(protocol.AgentSpawn{
+		Type:    protocol.TypeAgentSpawn,
+		AgentID: subAgentID,
+		Name:    name,
+		Role:    role,
+		Ts:      protocol.NowMs(),
+	})
+	if err == nil {
+		h.eventSink(ev)
 	}
 }
 

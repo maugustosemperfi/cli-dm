@@ -68,9 +68,13 @@ func NewJSONLWatcher(filePath, agentID string, mp *mapper.Mapper, sink EventSink
 	}
 }
 
+// BackfillBytes controls how many bytes from the end of the file to backfill
+// when starting without full catch-up. Default: 64 KB (covers ~2-5 min of activity).
+const BackfillBytes int64 = 64 * 1024
+
 // Start begins watching the file. If catchUp is true, it reads from the
-// beginning of the file; otherwise it seeks to the end and only processes
-// new data.
+// beginning of the file; otherwise it backfills the last ~64KB (recent activity)
+// to give an immediate snapshot of what's happening.
 func (w *JSONLWatcher) Start(catchUp bool) error {
 	f, err := os.Open(w.filePath)
 	if err != nil {
@@ -83,7 +87,13 @@ func (w *JSONLWatcher) Start(catchUp bool) error {
 			f.Close()
 			return err
 		}
-		w.offset = info.Size()
+		// Backfill: start from (end - BackfillBytes) instead of the very end
+		// This lets us see recent activity on reconnect
+		backfillStart := info.Size() - BackfillBytes
+		if backfillStart < 0 {
+			backfillStart = 0
+		}
+		w.offset = backfillStart
 	}
 
 	f.Close()
@@ -100,16 +110,48 @@ func (w *JSONLWatcher) Stop() {
 }
 
 func (w *JSONLWatcher) watchLoop() {
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
+	pollTicker := time.NewTicker(200 * time.Millisecond)
+	sweepTicker := time.NewTicker(2 * time.Minute)
+	defer pollTicker.Stop()
+	defer sweepTicker.Stop()
 
 	for {
 		select {
 		case <-w.done:
 			return
-		case <-ticker.C:
+		case <-pollTicker.C:
 			w.poll()
+		case <-sweepTicker.C:
+			w.sweepStale()
 		}
+	}
+}
+
+// sweepStale checks if the JSONL file has been modified recently.
+// If not, marks the main agent as "left the dungeon" (session abandoned).
+func (w *JSONLWatcher) sweepStale() {
+	info, err := os.Stat(w.filePath)
+	if err != nil {
+		return
+	}
+	// If file hasn't been modified in 5 minutes, session is likely abandoned
+	if time.Since(info.ModTime()) > 5*time.Minute {
+		// Emit completion event for main agent (if not already completed)
+		state := w.mp.GetState(w.agentID)
+		if state == nil {
+			return
+		}
+		ev, err := protocol.NewEvent(protocol.AgentComplete{
+			Type:     protocol.TypeAgentComplete,
+			AgentID:  w.agentID,
+			ExitCode: 0,
+			Ts:       protocol.NowMs(),
+		})
+		if err == nil {
+			w.eventSink(ev)
+		}
+		w.emitRawOutput("\033[90m— session appears abandoned (no activity for 5 min) —\033[0m\r\n")
+		w.logger.Info("session appears stale", "path", w.filePath, "agent", w.agentID)
 	}
 }
 
@@ -172,6 +214,25 @@ func (w *JSONLWatcher) poll() {
 		if err != nil {
 			w.logger.Debug("skipping unparseable line", "error", err)
 			continue
+		}
+
+		// Extract token/cost data from assistant messages → emit stats event
+		var rawEntry map[string]any
+		if json.Unmarshal(line, &rawEntry) == nil {
+			if input, output, cost, ok := mapper.ExtractTokensFromMessage(rawEntry); ok {
+				agentIDForStats := w.agentID
+				if aid, ok2 := rawEntry["agentId"].(string); ok2 && aid != "" {
+					agentIDForStats = aid
+				}
+				statsEv, _ := protocol.NewEvent(protocol.AgentStats{
+					Type:    protocol.TypeAgentStats,
+					AgentID: agentIDForStats,
+					Tokens:  input + output,
+					CostUSD: cost,
+					Ts:      protocol.NowMs(),
+				})
+				w.eventSink(statsEv)
+			}
 		}
 
 		// Log entries that produced no events AND no terminal output

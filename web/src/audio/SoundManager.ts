@@ -174,6 +174,55 @@ class SoundManager {
       osc.stop(t + noteDuration + 0.03);
     }
   }
+  /**
+   * Ascending fanfare — retro "level up" sound.
+   *
+   * Six-note ascending sine arpeggio with sustain: C5→E5→G5→C6→E6→G6.
+   * Longer notes (100ms) with overlapping tails for a triumphant feel.
+   */
+  async playLevelUp(): Promise<void> {
+    if (!this.enabled) return;
+    const ctx = await this.getContext();
+    const now = ctx.currentTime;
+
+    const notes = [523, 659, 784, 1047, 1319, 1568]; // C5→E5→G5→C6→E6→G6
+    const noteDuration = 0.1;
+
+    for (let i = 0; i < notes.length; i++) {
+      const t = now + i * noteDuration;
+
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(notes[i], t);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.15, t + 0.01);
+      gain.gain.setValueAtTime(0.15, t + noteDuration);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + noteDuration + 0.3);
+
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + noteDuration + 0.3);
+    }
+
+    // Final chord — C6+E6+G6 together for impact
+    const chord = [1047, 1319, 1568];
+    const chordStart = now + notes.length * noteDuration;
+    for (const freq of chord) {
+      const osc = ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, chordStart);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.08, chordStart);
+      gain.gain.exponentialRampToValueAtTime(0.001, chordStart + 0.5);
+
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(chordStart);
+      osc.stop(chordStart + 0.5);
+    }
+  }
 }
 
 export const soundManager = new SoundManager();
