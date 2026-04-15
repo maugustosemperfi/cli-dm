@@ -56,6 +56,8 @@ export interface AgentState extends AgentSnapshot {
   discoveredPaths: Set<string>;
   discoveredPathCount: number;
   lastDiscoveredPath?: string;
+  // Activity tracking — distinguish truly idle from briefly-between-actions
+  lastActiveTs: number; // timestamp of last non-idle action
   // Fog of war — rooms this agent has visited
   visitedRooms: Set<string>;
   // Achievement tracking
@@ -198,6 +200,10 @@ export const useGameState = create<GameState>((set, get) => ({
   selectAgent: (agentId) => set({ selectedAgent: agentId }),
 
   handleEvent: (event) => {
+    // Debug: log non-noisy events
+    if (event.type !== "raw.stdout" && event.type !== "raw.stderr") {
+      console.log(`[CLI_DM] event: ${event.type}`, event);
+    }
     const state = get();
 
     const pushLog = (entry: Omit<EventLogEntry, "ts">) => {
@@ -235,6 +241,7 @@ export const useGameState = create<GameState>((set, get) => ({
             discoveredPaths: existing?.discoveredPaths ?? new Set(),
             discoveredPathCount: existing?.discoveredPathCount ?? 0,
             lastDiscoveredPath: existing?.lastDiscoveredPath,
+            lastActiveTs: existing?.lastActiveTs ?? 0,
             visitedRooms: existing?.visitedRooms ?? new Set(),
             achievements: existing?.achievements ?? new Set(),
             totalEdits: existing?.totalEdits ?? 0,
@@ -263,6 +270,7 @@ export const useGameState = create<GameState>((set, get) => ({
           tokens: _persistedStats.get(event.agentId)?.tokens ?? 0,
           prevLevel: _persistedStats.get(event.agentId)?.level ?? 1,
           activityHeat: 0,
+          lastActiveTs: 0,
           discoveredPaths: new Set(),
           discoveredPathCount: 0,
           visitedRooms: new Set(),
@@ -379,6 +387,7 @@ export const useGameState = create<GameState>((set, get) => ({
             currentAction: event.action,
             currentDetail: event.detail,
             activityHeat: agent.activityHeat + 1,
+            lastActiveTs: event.ts ?? Date.now(),
             discoveredPaths,
             discoveredPathCount,
             lastDiscoveredPath,

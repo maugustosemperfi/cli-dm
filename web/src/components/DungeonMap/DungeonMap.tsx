@@ -47,7 +47,7 @@ export function DungeonMap() {
   const bannersRef = useRef<AchievementBanner[]>([]);
   const checkedAchievementsRef = useRef(new Map<string, Set<string>>());
   const greetingMgrRef = useRef(new GreetingManager());
-  const completedAgentsRef = useRef(new Set<string>());
+  const completedAgentsRef = useRef(new Map<string, number>()); // agentId → completion timestamp
   const blockedAgentsRef = useRef(new Set<string>());
   const prevActionsRef = useRef(new Map<string, string>()); // agentId → last action
   const creatureSpawnCooldownRef = useRef(new Map<string, number>()); // agentId → timestamp
@@ -510,6 +510,9 @@ export function DungeonMap() {
         }
         sp.setName(agent.name);
         sp.update(agent.currentAction, agent.isBlocked ?? false, agent.isComplete ?? false, agent.currentDetail);
+        // Dim agents that have never been active or haven't acted for 30+ seconds
+        const IDLE_THRESHOLD = 30_000;
+        sp.setTrulyIdle(agent.lastActiveTs === 0 || (now - agent.lastActiveTs) > IDLE_THRESHOLD);
 
         // Detect level-up
         if (agent.level > agent.prevLevel) {
@@ -518,7 +521,7 @@ export function DungeonMap() {
 
         // Spawn loot effect when agent newly completes
         if (agent.isComplete && !completedAgentsRef.current.has(agent.agentId)) {
-          completedAgentsRef.current.add(agent.agentId);
+          completedAgentsRef.current.set(agent.agentId, now);
           const loot = new LootEffect(sp.position.x, sp.position.y, sp.role);
           world.addChild(loot);
           lootEffectsRef.current.push(loot);
@@ -753,6 +756,14 @@ export function DungeonMap() {
           }
         }
       }
+      // Remove completed agents after 10 seconds
+      const REMOVE_AFTER = 10_000;
+      for (const [id, completedAt] of completedAgentsRef.current) {
+        if (now - completedAt > REMOVE_AFTER) {
+          seenA.delete(id); // force removal below
+          completedAgentsRef.current.delete(id);
+        }
+      }
       for (const [id, sp] of sprites) {
         if (!seenA.has(id)) {
           world.removeChild(sp);
@@ -766,7 +777,14 @@ export function DungeonMap() {
     [selectAgent, toolFlows, errorPropagations]
   );
 
-  useEffect(() => { syncScene(dag, agents); }, [dag, agents, syncScene]);
+  useEffect(() => {
+    syncScene(dag, agents);
+    // Debug: log agent states to console
+    const summary = [...agents.entries()].map(([_id, a]) =>
+      `${a.name.padEnd(20)} | action=${a.currentAction.padEnd(10)} | lastActive=${a.lastActiveTs} | complete=${a.isComplete}`
+    ).join('\n');
+    if (agents.size > 0) console.log('[CLI_DM] Agent states:\n' + summary);
+  }, [dag, agents, syncScene]);
 
   const handleMinimapClick = useCallback(
     (worldX: number, worldY: number) => {

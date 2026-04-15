@@ -8,7 +8,10 @@ import { SpeechBubble } from "./SpeechBubble";
 type MovementFn = (t: number) => [number, number];
 
 const MOVEMENTS: Record<string, MovementFn> = {
-  idle: () => [0, 0],
+  idle: (t) => [
+    Math.sin(t * 0.008) * 4,
+    Math.cos(t * 0.006) * 3,
+  ],
   thinking: (t) => [
     Math.sin(t * 0.005) * 2,
     Math.sin(t * 0.012) * 8,
@@ -127,6 +130,7 @@ export class AgentSprite extends Container {
   /** Public accessors for DungeonMap ticker */
   get currentActionPublic(): ActionType { return this.currentAction; }
   get isCompletePublic(): boolean { return this.isComplete; }
+  private trulyIdle = false; // no action for 30+ seconds
   private animState: AnimState = "idle";
   private frameIndex = 0;
   private frameTimer = 0;
@@ -281,7 +285,7 @@ export class AgentSprite extends Container {
     this.currentDetail = detail;
     this.isBlocked = blocked;
     this.isComplete = complete;
-    this.alpha = complete ? 0.35 : 1;
+    this.alpha = complete ? 0.35 : this.trulyIdle ? 0.5 : 1;
 
     // Trigger compaction brain-clearing particles
     if (detail === "compacting memory" && this.compactTimer <= 0) {
@@ -311,6 +315,11 @@ export class AgentSprite extends Container {
     if (!this.greetingActive) {
       this.speechBubble.setText(action, detail);
     }
+  }
+
+  /** Mark this agent as truly idle (no action for 30+ seconds) — dims the sprite */
+  setTrulyIdle(idle: boolean) {
+    this.trulyIdle = idle;
   }
 
   /** Tell the agent about neighboring rooms it can wander to */
@@ -408,7 +417,7 @@ export class AgentSprite extends Container {
     // --- Corridor wandering state machine ---
     // How eagerly each action type explores (0 = never, higher = more often)
     const WANDER_CHANCE: Record<string, number> = {
-      idle: 0,           // idle agents stay in their room
+      idle: 0.012,       // regular strolls
       read: 0.035,       // actively exploring corridors
       thinking: 0.006,   // sometimes paces the halls
       edit: 0.015,       // steps out between edits

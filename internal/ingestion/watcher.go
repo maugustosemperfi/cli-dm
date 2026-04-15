@@ -51,8 +51,8 @@ type JSONLWatcher struct {
 	// Inferred activity: detect when model is generating but JSONL is silent
 	inferStates map[string]*inferredState
 
-	// Stale detection: avoid re-emitting idle every sweep cycle
-	staleEmitted bool
+	// Stale detection: 0=fresh, 1=idle emitted (5min), 2=complete emitted (30min)
+	staleEmitted int
 }
 
 // NewJSONLWatcher creates a watcher for the given JSONL file path.
@@ -131,19 +131,40 @@ func (w *JSONLWatcher) watchLoop() {
 }
 
 // sweepStale checks if the JSONL file has been modified recently.
-// If not, transitions the agent to idle (not complete) so it can wake up
-// when new activity arrives.
+//   - 5 min idle → transition to idle (agent can wake up)
+//   - 30 min idle → mark complete (agent leaves the dungeon)
 func (w *JSONLWatcher) sweepStale() {
-	if w.staleEmitted {
-		return
-	}
 	info, err := os.Stat(w.filePath)
 	if err != nil {
 		return
 	}
-	// If file hasn't been modified in 5 minutes, transition to idle
-	if time.Since(info.ModTime()) > 5*time.Minute {
-		// Route through mapper so internal state stays consistent
+	staleDur := time.Since(info.ModTime())
+
+	// 30 min: agent leaves the dungeon
+	if staleDur > 30*time.Minute {
+		if w.staleEmitted == 2 {
+			return
+		}
+		ev, err := protocol.NewEvent(protocol.AgentComplete{
+			Type:     protocol.TypeAgentComplete,
+			AgentID:  w.agentID,
+			ExitCode: 0,
+			Ts:       protocol.NowMs(),
+		})
+		if err == nil {
+			w.eventSink(ev)
+		}
+		w.staleEmitted = 2
+		w.emitRawOutput("\033[90m— session ended (no activity for 30 min) —\033[0m\r\n")
+		w.logger.Info("session ended", "path", w.filePath, "agent", w.agentID)
+		return
+	}
+
+	// 5 min: transition to idle
+	if staleDur > 5*time.Minute {
+		if w.staleEmitted >= 1 {
+			return
+		}
 		te := mapper.ToolEvent{
 			Kind:     mapper.ToolEnd,
 			AgentID:  w.agentID,
@@ -153,7 +174,7 @@ func (w *JSONLWatcher) sweepStale() {
 		for _, ev := range events {
 			w.eventSink(ev)
 		}
-		w.staleEmitted = true
+		w.staleEmitted = 1
 		w.emitRawOutput("\033[90m— session idle (no activity for 5 min) —\033[0m\r\n")
 		w.logger.Info("session idle", "path", w.filePath, "agent", w.agentID)
 	}
@@ -200,8 +221,8 @@ func (w *JSONLWatcher) poll() {
 
 	w.offset += int64(len(data))
 
-	// New data arrived — agent is alive, reset stale flag
-	w.staleEmitted = false
+	// New data arrived — agent is alive, reset stale tier
+	w.staleEmitted = 0
 
 	// Split into lines and process each complete line
 	lines := bytes.Split(data, []byte("\n"))

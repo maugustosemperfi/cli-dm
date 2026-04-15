@@ -41,6 +41,7 @@ type Mapper struct {
 	states map[string]*parser.AgentState
 	// Subagent tracking: toolUseID → subagentID for Agent tool calls
 	activeSubagents map[string]string
+	spawnedSubs     map[string]bool // subagentID → already spawned (dedup)
 	subCount        int
 }
 
@@ -55,6 +56,7 @@ func New() *Mapper {
 	return &Mapper{
 		states:          make(map[string]*parser.AgentState),
 		activeSubagents: make(map[string]string),
+		spawnedSubs:     make(map[string]bool),
 	}
 }
 
@@ -104,18 +106,23 @@ func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
 			name = fmt.Sprintf("subagent-%d", m.subCount+1)
 		}
 		subID := te.AgentID + ":" + name
-		role := mapperSubRoles[m.subCount%len(mapperSubRoles)]
-		m.subCount++
 
-		spawnEv, err := protocol.NewEvent(protocol.AgentSpawn{
-			Type:    protocol.TypeAgentSpawn,
-			AgentID: subID,
-			Name:    name,
-			Role:    role,
-			Ts:      protocol.NowMs(),
-		})
-		if err == nil {
-			events = append(events, spawnEv)
+		// Only spawn if we haven't seen this subagent before (avoids backfill dupes)
+		if !m.spawnedSubs[subID] {
+			role := mapperSubRoles[m.subCount%len(mapperSubRoles)]
+			m.subCount++
+
+			spawnEv, err := protocol.NewEvent(protocol.AgentSpawn{
+				Type:    protocol.TypeAgentSpawn,
+				AgentID: subID,
+				Name:    name,
+				Role:    role,
+				Ts:      protocol.NowMs(),
+			})
+			if err == nil {
+				events = append(events, spawnEv)
+			}
+			m.spawnedSubs[subID] = true
 		}
 		m.activeSubagents[te.ToolUseID] = subID
 	}
