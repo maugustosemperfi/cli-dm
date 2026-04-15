@@ -1,0 +1,19 @@
+# Go
+bin/
+*.exe
+
+# Web
+web/node_modules/
+web/dist/
+web/.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

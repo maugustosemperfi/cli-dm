@@ -1,0 +1,269 @@
+package mapper
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/marcosaugustodev/cli-dm/internal/parser"
+	"github.com/marcosaugustodev/cli-dm/internal/protocol"
+)
+
+// ToolEventKind categorizes what phase of a tool invocation we're observing.
+type ToolEventKind string
+
+const (
+	ToolStart   ToolEventKind = "start"
+	ToolEnd     ToolEventKind = "end"
+	ToolError   ToolEventKind = "error"
+	SessionLife ToolEventKind = "session"
+)
+
+// ToolEvent is the intermediate representation produced by parsers
+// (stream-json, hook receiver, JSONL watcher) before being mapped to
+// protocol.Event values.
+type ToolEvent struct {
+	Kind      ToolEventKind
+	AgentID   string
+	ToolName  string         // "Bash", "Read", "Edit", "Grep", "Glob", "Write", "Agent", "WebFetch", "WebSearch", etc.
+	Input     map[string]any // Tool input parameters
+	Output    string         // Tool output (for ToolEnd)
+	IsError   bool
+	ExitCode  int
+	ToolUseID string
+	Timestamp int64
+	IsStart   bool // For SessionLife: true = spawn, false = complete
+}
+
+// Mapper converts ToolEvents into protocol.Events using per-agent state tracking.
+type Mapper struct {
+	mu     sync.Mutex
+	states map[string]*parser.AgentState
+}
+
+// New creates a new Mapper.
+func New() *Mapper {
+	return &Mapper{
+		states: make(map[string]*parser.AgentState),
+	}
+}
+
+// GetState returns (or creates) the AgentState for the given agent.
+func (m *Mapper) GetState(agentID string) *parser.AgentState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.states[agentID]
+	if !ok {
+		s = parser.NewAgentState(agentID)
+		m.states[agentID] = s
+	}
+	return s
+}
+
+// Map converts a single ToolEvent into zero or more protocol.Events.
+func (m *Mapper) Map(te ToolEvent) []protocol.Event {
+	switch te.Kind {
+	case ToolStart:
+		return m.handleToolStart(te)
+	case ToolEnd:
+		return m.handleToolEnd(te)
+	case ToolError:
+		// Treat as ToolEnd with error flag
+		te.IsError = true
+		return m.handleToolEnd(te)
+	case SessionLife:
+		return m.handleSessionLife(te)
+	default:
+		return nil
+	}
+}
+
+func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
+	state := m.GetState(te.AgentID)
+	action, detail := mapToolName(te.ToolName, te.Input)
+	r := state.Transition(action, detail)
+	return r.Events
+}
+
+func (m *Mapper) handleToolEnd(te ToolEvent) []protocol.Event {
+	state := m.GetState(te.AgentID)
+	var events []protocol.Event
+
+	if te.IsError {
+		// Check output for specific blocker patterns
+		output := te.Output
+		switch {
+		case ReBlocked.MatchString(output):
+			events = append(events, state.MarkBlocked(protocol.BlockerDependency, "", truncate(output, 200)))
+		case ReConflict.MatchString(output):
+			events = append(events, state.MarkBlocked(protocol.BlockerConflict, "", truncate(output, 200)))
+		case ReRateLimit.MatchString(output):
+			events = append(events, state.MarkBlocked(protocol.BlockerTimeout, "", truncate(output, 200)))
+		default:
+			events = append(events, state.MarkError(truncate(output, 200)))
+		}
+	}
+
+	// Transition to idle to end the current action
+	r := state.Transition(protocol.ActionIdle, "")
+	events = append(events, r.Events...)
+	return events
+}
+
+func (m *Mapper) handleSessionLife(te ToolEvent) []protocol.Event {
+	now := protocol.NowMs()
+	if te.IsStart {
+		ev, err := protocol.NewEvent(protocol.AgentSpawn{
+			Type:    protocol.TypeAgentSpawn,
+			AgentID: te.AgentID,
+			Name:    te.AgentID,
+			Role:    protocol.RoleWarrior,
+			Ts:      now,
+		})
+		if err != nil {
+			return nil
+		}
+		return []protocol.Event{ev}
+	}
+	// Session complete
+	ev, err := protocol.NewEvent(protocol.AgentComplete{
+		Type:     protocol.TypeAgentComplete,
+		AgentID:  te.AgentID,
+		ExitCode: te.ExitCode,
+		Ts:       now,
+	})
+	if err != nil {
+		return nil
+	}
+	return []protocol.Event{ev}
+}
+
+// mapToolName maps a Claude tool name + input to an ActionType and detail string.
+func mapToolName(toolName string, input map[string]any) (protocol.ActionType, string) {
+	switch toolName {
+	case "Read":
+		return protocol.ActionRead, extractString(input, "file_path")
+	case "Grep", "Glob":
+		return protocol.ActionRead, extractString(input, "pattern")
+	case "Edit", "Write":
+		return protocol.ActionEdit, extractString(input, "file_path")
+	case "Bash":
+		return classifyBash(input)
+	case "Agent":
+		detail := extractString(input, "description")
+		if detail == "" {
+			detail = "spawning agent"
+		}
+		return protocol.ActionBuild, detail
+	case "WebFetch":
+		return protocol.ActionNetwork, extractString(input, "url")
+	case "WebSearch":
+		return protocol.ActionNetwork, extractString(input, "query")
+	case "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "SendMessage",
+		"AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+		"NotebookEdit", "Skill", "CronCreate", "CronDelete", "CronList",
+		"TaskOutput", "TaskStop", "TodoWrite":
+		return protocol.ActionThinking, extractDetail(toolName, input)
+	case "__thinking__":
+		return protocol.ActionThinking, "reasoning"
+	case "__generating__":
+		return protocol.ActionThinking, "generating response"
+	case "__responding__":
+		return protocol.ActionThinking, "writing response"
+	case "__user_input__":
+		return protocol.ActionThinking, "received prompt"
+	case "__compact__":
+		return protocol.ActionThinking, "compacting memory"
+	case "__permission__":
+		return protocol.ActionThinking, "awaiting permission"
+	default:
+		// MCP tools: mcp__server__tool_name
+		if strings.HasPrefix(toolName, "mcp__") {
+			parts := strings.SplitN(toolName[5:], "__", 2)
+			server := parts[0]
+			tool := ""
+			if len(parts) > 1 {
+				tool = parts[1]
+			}
+			detail := "summoning " + server
+			if tool != "" {
+				detail += ": " + tool
+			}
+			return protocol.ActionNetwork, detail
+		}
+		GetUnknownLogger().Log(UnknownEntry{
+			Reason:   "unknown_tool",
+			ToolName: toolName,
+			RawData:  input,
+		})
+		return protocol.ActionShell, toolName
+	}
+}
+
+// classifyBash inspects the command string in a Bash tool input and returns
+// the most specific action type.
+func classifyBash(input map[string]any) (protocol.ActionType, string) {
+	cmd := extractString(input, "command")
+	if cmd == "" {
+		return protocol.ActionShell, "bash"
+	}
+
+	detail := truncate(cmd, 120)
+
+	if ReGitOp.MatchString(cmd) {
+		m := ReGitOp.FindStringSubmatch(cmd)
+		return protocol.ActionGit, "git " + m[1]
+	}
+	if ReTestRunner.MatchString(cmd) {
+		return protocol.ActionTest, detail
+	}
+	if ReBuild.MatchString(cmd) {
+		return protocol.ActionBuild, detail
+	}
+	if ReInstall.MatchString(cmd) {
+		return protocol.ActionBuild, detail
+	}
+	return protocol.ActionShell, detail
+}
+
+// extractString pulls a string value from a map by key, returning "" if missing or wrong type.
+func extractString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return s
+}
+
+// extractDetail builds a display string from tool input for task-related tools.
+func extractDetail(toolName string, input map[string]any) string {
+	switch toolName {
+	case "TaskCreate":
+		return "creating task: " + extractString(input, "subject")
+	case "TaskUpdate":
+		return "updating task: " + extractString(input, "taskId")
+	case "TaskList":
+		return "listing tasks"
+	case "TaskGet":
+		return "reading task: " + extractString(input, "taskId")
+	case "SendMessage":
+		return "sending message"
+	default:
+		return toolName
+	}
+}
+
+// truncate shortens a string to maxLen, appending "..." if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}

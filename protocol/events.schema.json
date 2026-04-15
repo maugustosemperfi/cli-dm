@@ -1,0 +1,273 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CLI_DM Event Protocol",
+  "description": "Event types flowing from Go backend to browser frontend via WebSocket",
+  "definitions": {
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp in milliseconds"
+    },
+    "agentId": {
+      "type": "string",
+      "description": "Unique agent identifier (e.g., t1, t2)"
+    },
+    "actionType": {
+      "type": "string",
+      "enum": ["idle", "thinking", "read", "edit", "test", "git", "build", "shell", "network", "blocked", "error"]
+    },
+    "nodeStatus": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "completed", "failed", "blocked"]
+    },
+    "agentRole": {
+      "type": "string",
+      "enum": ["warrior", "rogue", "mage", "ranger", "cleric", "bard"]
+    },
+    "blockerType": {
+      "type": "string",
+      "enum": ["dependency", "error", "conflict", "timeout", "manual"]
+    },
+
+    "agentSpawn": {
+      "type": "object",
+      "required": ["type", "agentId", "name", "role", "ts"],
+      "properties": {
+        "type": { "const": "agent.spawn" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "name": { "type": "string", "description": "Display name (e.g., Blue Fighter)" },
+        "role": { "$ref": "#/definitions/agentRole" },
+        "command": { "type": "string", "description": "The command being executed" },
+        "taskId": { "type": "string", "description": "Associated DAG node ID" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "agentIdle": {
+      "type": "object",
+      "required": ["type", "agentId", "ts"],
+      "properties": {
+        "type": { "const": "agent.idle" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "agentActive": {
+      "type": "object",
+      "required": ["type", "agentId", "ts"],
+      "properties": {
+        "type": { "const": "agent.active" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "agentComplete": {
+      "type": "object",
+      "required": ["type", "agentId", "exitCode", "ts"],
+      "properties": {
+        "type": { "const": "agent.complete" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "exitCode": { "type": "integer" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "agentError": {
+      "type": "object",
+      "required": ["type", "agentId", "message", "ts"],
+      "properties": {
+        "type": { "const": "agent.error" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "message": { "type": "string" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+
+    "actionStart": {
+      "type": "object",
+      "required": ["type", "agentId", "action", "ts"],
+      "properties": {
+        "type": { "const": "action.start" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "action": { "$ref": "#/definitions/actionType" },
+        "detail": { "type": "string", "description": "Context (file path, command, etc.)" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "actionEnd": {
+      "type": "object",
+      "required": ["type", "agentId", "action", "ts"],
+      "properties": {
+        "type": { "const": "action.end" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "action": { "$ref": "#/definitions/actionType" },
+        "result": { "type": "string", "enum": ["pass", "fail", "unknown"] },
+        "detail": { "type": "string" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+
+    "blockerHit": {
+      "type": "object",
+      "required": ["type", "agentId", "blockerType", "ts"],
+      "properties": {
+        "type": { "const": "blocker.hit" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "blockerType": { "$ref": "#/definitions/blockerType" },
+        "blockedBy": { "$ref": "#/definitions/agentId" },
+        "detail": { "type": "string" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "blockerResolve": {
+      "type": "object",
+      "required": ["type", "agentId", "ts"],
+      "properties": {
+        "type": { "const": "blocker.resolve" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+
+    "dagNodeAdd": {
+      "type": "object",
+      "required": ["type", "nodeId", "label"],
+      "properties": {
+        "type": { "const": "dag.node.add" },
+        "nodeId": { "type": "string" },
+        "label": { "type": "string" },
+        "assignee": { "$ref": "#/definitions/agentId" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "dagNodeStatus": {
+      "type": "object",
+      "required": ["type", "nodeId", "status"],
+      "properties": {
+        "type": { "const": "dag.node.status" },
+        "nodeId": { "type": "string" },
+        "status": { "$ref": "#/definitions/nodeStatus" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "dagEdgeAdd": {
+      "type": "object",
+      "required": ["type", "from", "to"],
+      "properties": {
+        "type": { "const": "dag.edge.add" },
+        "from": { "type": "string", "description": "Source node ID (dependency)" },
+        "to": { "type": "string", "description": "Target node ID (dependent)" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+
+    "rawStdout": {
+      "type": "object",
+      "required": ["type", "agentId", "data", "ts"],
+      "properties": {
+        "type": { "const": "raw.stdout" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "data": { "type": "string", "description": "Base64-encoded output chunk" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "rawStderr": {
+      "type": "object",
+      "required": ["type", "agentId", "data", "ts"],
+      "properties": {
+        "type": { "const": "raw.stderr" },
+        "agentId": { "$ref": "#/definitions/agentId" },
+        "data": { "type": "string", "description": "Base64-encoded error chunk" },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    },
+
+    "stateSnapshot": {
+      "type": "object",
+      "required": ["type", "agents", "dag", "ts"],
+      "description": "Full state sent on WebSocket connect for late joiners",
+      "properties": {
+        "type": { "const": "state.snapshot" },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["agentId", "name", "role", "currentAction"],
+            "properties": {
+              "agentId": { "$ref": "#/definitions/agentId" },
+              "name": { "type": "string" },
+              "role": { "$ref": "#/definitions/agentRole" },
+              "currentAction": { "$ref": "#/definitions/actionType" },
+              "currentDetail": { "type": "string" },
+              "isBlocked": { "type": "boolean" },
+              "errorCount": { "type": "integer" },
+              "isComplete": { "type": "boolean" },
+              "exitCode": { "type": "integer" }
+            }
+          }
+        },
+        "dag": {
+          "type": "object",
+          "required": ["nodes", "edges"],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["nodeId", "label", "status"],
+                "properties": {
+                  "nodeId": { "type": "string" },
+                  "label": { "type": "string" },
+                  "status": { "$ref": "#/definitions/nodeStatus" },
+                  "assignee": { "$ref": "#/definitions/agentId" }
+                }
+              }
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["from", "to"],
+                "properties": {
+                  "from": { "type": "string" },
+                  "to": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "ts": { "$ref": "#/definitions/timestamp" }
+      },
+      "additionalProperties": false
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/definitions/agentSpawn" },
+    { "$ref": "#/definitions/agentIdle" },
+    { "$ref": "#/definitions/agentActive" },
+    { "$ref": "#/definitions/agentComplete" },
+    { "$ref": "#/definitions/agentError" },
+    { "$ref": "#/definitions/actionStart" },
+    { "$ref": "#/definitions/actionEnd" },
+    { "$ref": "#/definitions/blockerHit" },
+    { "$ref": "#/definitions/blockerResolve" },
+    { "$ref": "#/definitions/dagNodeAdd" },
+    { "$ref": "#/definitions/dagNodeStatus" },
+    { "$ref": "#/definitions/dagEdgeAdd" },
+    { "$ref": "#/definitions/rawStdout" },
+    { "$ref": "#/definitions/rawStderr" },
+    { "$ref": "#/definitions/stateSnapshot" }
+  ]
+}

@@ -1,0 +1,23 @@
+adapter: claude
+port: 8420
+
+agents:
+  - name: "Blue Fighter"
+    role: warrior
+    command: "bash -c 'echo \"=== Blue Fighter: Implementing Auth ===\"; for i in $(seq 1 30); do echo \"Read src/auth/handler.go\"; sleep 1; echo \"  Edit src/auth/handler.go line $((i * 3))\"; sleep 0.5; if [ $i -eq 15 ]; then echo \"blocked by Test Auth\"; sleep 3; fi; done; echo \"git commit -m implement-auth\"; echo Done!'"
+    task: "Implement Auth"
+
+  - name: "Red Rogue"
+    role: rogue
+    command: "bash -c 'echo \"=== Red Rogue: Writing Tests ===\"; for i in $(seq 1 25); do echo \"Read test/auth_test.go\"; sleep 1; echo \"npm run test\"; sleep 1.5; if [ $i -eq 10 ]; then echo \"Error: assertion failed at test_login:42\" >&2; sleep 2; echo \"  Edit test/auth_test.go\"; sleep 1; fi; done; echo Done!'"
+    task: "Test Auth"
+    depends_on: ["Implement Auth"]
+
+  - name: "Purple Mage"
+    role: mage
+    command: "bash -c 'echo \"=== Purple Mage: Building Docs ===\"; for i in $(seq 1 20); do echo \"Read docs/api.md\"; sleep 0.8; echo \"Edit docs/api.md\"; sleep 1; done; echo Done!'"
+    task: "Write Docs"
+
+sessions:
+  enabled: true
+  retention_days: 30

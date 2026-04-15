@@ -1,0 +1,29 @@
+# Watch all projects under ~/dev/nu/ that have active Claude Code sessions.
+#
+# CLI_DM scans ~/.claude/projects/ for session directories matching
+# repos under the watch_dir, finds the most recent JSONL file for each,
+# and auto-creates a watcher agent per active project.
+#
+# Usage:
+#   cd ~/dev/nu/cli-dm
+#   go run ./cmd/cli-dm run --config examples/dungeon-watch-all.yaml
+#
+# Each project with a recent Claude session (< 24h) gets its own
+# character on the dungeon map. Their actions light up in real time
+# as you (or others) use Claude Code in those repos.
+
+port: 8420
+
+watch_dir: "~/dev/nu/"
+watch_age: "24h"       # only show sessions active in the last 24 hours
+
+# You can also add explicit agents alongside auto-discovered ones:
+# agents:
+#   - name: "Hook Observer"
+#     role: cleric
+#     source: hooks
+#     task: "Live Session"
+
+sessions:
+  enabled: true
+  retention_days: 30

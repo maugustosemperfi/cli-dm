@@ -1,0 +1,54 @@
+# Example: Mixed source modes — connect CLI_DM to real Claude Code sessions
+#
+# Source modes:
+#   pty          — spawn a shell command via PTY (default, original behavior)
+#   stream-json  — spawn claude with --output-format stream-json for structured events
+#   hooks        — receive events from Claude Code hook scripts (live interactive sessions)
+#   watch        — tail a Claude Code JSONL session log file
+
+adapter: claude
+port: 8420
+hooks_auth: "my-secret-token"
+
+agents:
+  # Source B: Spawn Claude with structured JSON output
+  # CLI_DM parses tool calls directly from the NDJSON stream
+  - name: "Blue Fighter"
+    role: warrior
+    source: stream-json
+    command: "claude --output-format stream-json -p 'Implement the auth module in src/auth/'"
+    task: "Implement Auth"
+
+  # Source C: Receive events from a running Claude Code session via hooks
+  # Configure hooks in ~/.claude/settings.json pointing to scripts/cli-dm-hook.sh
+  # The agent appears in CLI_DM and lights up when you use tools in your session
+  - name: "Red Rogue"
+    role: rogue
+    source: hooks
+    task: "Code Review"
+
+  # Source D: Tail a specific JSONL log file
+  # Useful for replaying or observing a known session
+  # - name: "Purple Mage"
+  #   role: mage
+  #   source: watch
+  #   watch_file: "~/.claude/projects/-Users-marcos-dev-myproject/abc123.jsonl"
+  #   task: "Write Docs"
+
+  # Source D with auto-discovery: finds the most recent session for a project
+  - name: "Green Ranger"
+    role: ranger
+    source: watch
+    project: "~/dev/nu/cli-dm"
+    task: "Monitor Session"
+
+  # Original PTY mode — backward compatible
+  - name: "Gold Cleric"
+    role: cleric
+    source: pty
+    command: "bash -c 'for i in $(seq 1 20); do echo \"Read config.yaml\"; sleep 1; echo \"Edit config.yaml\"; sleep 1; done; echo Done!'"
+    task: "Deploy Config"
+
+sessions:
+  enabled: true
+  retention_days: 30
