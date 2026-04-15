@@ -54,3 +54,12 @@ export const PADDING = 180;
 // 2D grid layout spacing
 export const GRID_COL_SPACING = 350;
 export const GRID_ROW_SPACING = 250;
+
+// Night palette — used by DayNightCycle for tinting
+export const NIGHT_THEME = {
+  torchGlow: 0xffa500,
+  torchFlame: 0xff8c00,
+  overlayColor: 0x0a0a1a,
+  maxDarkness: 0.35,
+  cycleDurationFrames: 36000,
+} as const;

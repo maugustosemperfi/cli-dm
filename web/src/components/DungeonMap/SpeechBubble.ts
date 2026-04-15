@@ -164,13 +164,9 @@ export class SpeechBubble extends Container {
 
   setText(action: ActionType, detail?: string) {
     if (action === "idle") {
-      if (!this.isIdle) {
-        // Just became idle — start the cycle
-        this.isIdle = true;
-        this.idleTimer = 0;
-        this.setIdlePhrase();
-      }
-      this.targetAlpha = 0.75;
+      // Idle agents are silent — no speech bubble
+      this.isIdle = false;
+      this.targetAlpha = 0;
       return;
     }
 

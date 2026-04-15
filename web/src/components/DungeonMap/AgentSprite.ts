@@ -8,10 +8,7 @@ import { SpeechBubble } from "./SpeechBubble";
 type MovementFn = (t: number) => [number, number];
 
 const MOVEMENTS: Record<string, MovementFn> = {
-  idle: (t) => [
-    Math.sin(t * 0.008) * 4,
-    Math.cos(t * 0.006) * 3,
-  ],
+  idle: () => [0, 0],
   thinking: (t) => [
     Math.sin(t * 0.005) * 2,
     Math.sin(t * 0.012) * 8,
@@ -176,7 +173,7 @@ export class AgentSprite extends Container {
 
     // Trail (drawn behind everything)
     this.trail = new Graphics();
-    this.trail.alpha = 0.3;
+    this.trail.alpha = 0.5;
     this.addChild(this.trail);
 
     // Shadow under character
@@ -411,7 +408,7 @@ export class AgentSprite extends Container {
     // --- Corridor wandering state machine ---
     // How eagerly each action type explores (0 = never, higher = more often)
     const WANDER_CHANCE: Record<string, number> = {
-      idle: 0.012,       // regular strolls
+      idle: 0,           // idle agents stay in their room
       read: 0.035,       // actively exploring corridors
       thinking: 0.006,   // sometimes paces the halls
       edit: 0.015,       // steps out between edits
@@ -629,7 +626,7 @@ export class AgentSprite extends Container {
 
     // Trail
     this.trailHistory.push([finalX, finalY]);
-    if (this.trailHistory.length > 20) this.trailHistory.shift();
+    if (this.trailHistory.length > 60) this.trailHistory.shift();
     this.drawTrail();
 
     // Action ring
@@ -684,15 +681,40 @@ export class AgentSprite extends Container {
 
   private drawTrail() {
     this.trail.clear();
-    if (this.trailHistory.length < 3) return;
-    const curr = this.trailHistory[this.trailHistory.length - 1];
-    for (let i = 0; i < this.trailHistory.length - 1; i++) {
-      const alpha = (i / this.trailHistory.length) * 0.4;
-      const radius = (i / this.trailHistory.length) * 2;
+    const len = this.trailHistory.length;
+    if (len < 3) return;
+    const curr = this.trailHistory[len - 1];
+
+    for (let i = 0; i < len - 1; i++) {
+      const progress = i / len;
       const [tx, ty] = this.trailHistory[i];
+      const relX = tx - curr[0];
+      const relY = ty - curr[1];
+
+      // Footprint: alternating left/right offset
+      const side = i % 2 === 0 ? -1 : 1;
+      const offsetX = side * 2;
+
+      // Size grows from tail to head
+      const footSize = 1.0 + progress * 1.5;
+
+      // Alpha with phosphorescent pulse
+      const baseAlpha = progress * 0.5;
+      const phosphor = 0.05 * Math.sin(this.time * 0.03 + i * 0.5);
+      const alpha = Math.max(0, baseAlpha + phosphor);
+
+      // Main footprint dot
       this.trail
-        .circle(tx - curr[0], ty - curr[1], radius + 0.5)
+        .circle(relX + offsetX, relY, footSize)
         .fill({ color: this.color, alpha });
+
+      // Phosphorescent glow for recent trail (last 30%)
+      if (progress > 0.7) {
+        const glowAlpha = (progress - 0.7) / 0.3 * 0.15 + phosphor * 0.5;
+        this.trail
+          .circle(relX + offsetX, relY, footSize * 2.5)
+          .fill({ color: this.color, alpha: Math.max(0, glowAlpha) });
+      }
     }
   }
 

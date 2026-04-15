@@ -56,6 +56,13 @@ export interface AgentState extends AgentSnapshot {
   discoveredPaths: Set<string>;
   discoveredPathCount: number;
   lastDiscoveredPath?: string;
+  // Fog of war — rooms this agent has visited
+  visitedRooms: Set<string>;
+  // Achievement tracking
+  achievements: Set<string>;
+  totalEdits: number;
+  totalBuilds: number;
+  totalTests: number;
 }
 
 export interface EventLogEntry {
@@ -140,6 +147,41 @@ interface GameState {
 const MAX_TOOL_FLOWS = 200;
 const MAX_TRANSCRIPT = 1000;
 
+// --- localStorage persistence for RPG stats ---
+interface PersistedStats {
+  xp: number;
+  gold: number;
+  level: number;
+  tokens: number;
+}
+
+const STORAGE_KEY = "cli_dm_agent_stats";
+
+function loadPersistedStats(): Map<string, PersistedStats> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return new Map();
+    const obj = JSON.parse(raw) as Record<string, PersistedStats>;
+    return new Map(Object.entries(obj));
+  } catch {
+    return new Map();
+  }
+}
+
+function savePersistedStats(agents: Map<string, AgentState>): void {
+  try {
+    const obj: Record<string, PersistedStats> = {};
+    for (const [id, a] of agents) {
+      if (a.xp > 0 || a.gold > 0 || a.tokens > 0) {
+        obj[id] = { xp: a.xp, gold: a.gold, level: a.level, tokens: a.tokens };
+      }
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  } catch { /* quota exceeded — silently ignore */ }
+}
+
+const _persistedStats = loadPersistedStats();
+
 export const useGameState = create<GameState>((set, get) => ({
   agents: new Map(),
   dag: { nodes: [], edges: [] },
@@ -184,15 +226,20 @@ export const useGameState = create<GameState>((set, get) => ({
           agents.set(snap.agentId, {
             ...snap,
             outputBuffer: [],
-            xp: existing?.xp ?? 0,
-            gold: existing?.gold ?? 0,
-            level: existing?.level ?? 1,
-            tokens: existing?.tokens ?? 0,
-            prevLevel: existing?.prevLevel ?? 1,
+            xp: existing?.xp ?? _persistedStats.get(snap.agentId)?.xp ?? 0,
+            gold: existing?.gold ?? _persistedStats.get(snap.agentId)?.gold ?? 0,
+            level: existing?.level ?? _persistedStats.get(snap.agentId)?.level ?? 1,
+            tokens: existing?.tokens ?? _persistedStats.get(snap.agentId)?.tokens ?? 0,
+            prevLevel: existing?.prevLevel ?? _persistedStats.get(snap.agentId)?.level ?? 1,
             activityHeat: existing?.activityHeat ?? 0,
             discoveredPaths: existing?.discoveredPaths ?? new Set(),
             discoveredPathCount: existing?.discoveredPathCount ?? 0,
             lastDiscoveredPath: existing?.lastDiscoveredPath,
+            visitedRooms: existing?.visitedRooms ?? new Set(),
+            achievements: existing?.achievements ?? new Set(),
+            totalEdits: existing?.totalEdits ?? 0,
+            totalBuilds: existing?.totalBuilds ?? 0,
+            totalTests: existing?.totalTests ?? 0,
           });
         }
         set({ agents, dag: event.dag });
@@ -210,14 +257,19 @@ export const useGameState = create<GameState>((set, get) => ({
           isBlocked: false,
           isComplete: false,
           outputBuffer: [],
-          xp: 0,
-          gold: 0,
-          level: 1,
-          tokens: 0,
-          prevLevel: 1,
+          xp: _persistedStats.get(event.agentId)?.xp ?? 0,
+          gold: _persistedStats.get(event.agentId)?.gold ?? 0,
+          level: _persistedStats.get(event.agentId)?.level ?? 1,
+          tokens: _persistedStats.get(event.agentId)?.tokens ?? 0,
+          prevLevel: _persistedStats.get(event.agentId)?.level ?? 1,
           activityHeat: 0,
           discoveredPaths: new Set(),
           discoveredPathCount: 0,
+          visitedRooms: new Set(),
+          achievements: new Set(),
+          totalEdits: 0,
+          totalBuilds: 0,
+          totalTests: 0,
         });
         set({ agents });
         pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
@@ -314,6 +366,14 @@ export const useGameState = create<GameState>((set, get) => ({
             }
           }
 
+          // Visit tracking for fog of war
+          let { visitedRooms } = agent;
+          const visitedNodeId = agentNodeId(event.agentId);
+          if (visitedNodeId && !visitedRooms.has(visitedNodeId)) {
+            visitedRooms = new Set(visitedRooms);
+            visitedRooms.add(visitedNodeId);
+          }
+
           agents.set(event.agentId, {
             ...agent,
             currentAction: event.action,
@@ -322,6 +382,7 @@ export const useGameState = create<GameState>((set, get) => ({
             discoveredPaths,
             discoveredPathCount,
             lastDiscoveredPath,
+            visitedRooms,
           });
           set({ agents });
 
@@ -369,6 +430,10 @@ export const useGameState = create<GameState>((set, get) => ({
           const xpGain = XP_TABLE[agent.currentAction] ?? 1;
           const newXP = agent.xp + xpGain;
           const newLevel = levelFromXP(newXP);
+          // Increment action counters for achievements
+          const totalEdits = agent.totalEdits + (agent.currentAction === "edit" ? 1 : 0);
+          const totalBuilds = agent.totalBuilds + (agent.currentAction === "build" ? 1 : 0);
+          const totalTests = agent.totalTests + (agent.currentAction === "test" ? 1 : 0);
           agents.set(event.agentId, {
             ...agent,
             currentAction: "idle" as ActionType,
@@ -376,8 +441,12 @@ export const useGameState = create<GameState>((set, get) => ({
             xp: newXP,
             prevLevel: agent.level,
             level: newLevel,
+            totalEdits,
+            totalBuilds,
+            totalTests,
           });
           set({ agents });
+          savePersistedStats(agents);
 
           // Timeline: close open segment
           const tl = state.timeline;
@@ -409,6 +478,7 @@ export const useGameState = create<GameState>((set, get) => ({
             gold: agent.gold + (event.costUsd ?? 0) * 100, // cents
           });
           set({ agents });
+          savePersistedStats(agents);
         }
         break;
       }

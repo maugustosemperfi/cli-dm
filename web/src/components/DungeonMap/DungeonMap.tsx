@@ -14,6 +14,10 @@ import { BossEncounter, type BossType } from "./BossEncounter";
 import { CompanionPet, petTypeForRole } from "./CompanionPet";
 import { BlockedDoor } from "./BlockedDoor";
 import { DiscoveryDoor } from "./DiscoveryDoor";
+import { TorchLight } from "./TorchLight";
+import { DayNightCycle } from "./DayNightCycle";
+import { FogOfWar } from "./FogOfWar";
+import { AchievementBanner, type AchievementType } from "./AchievementBanner";
 import { GreetingManager } from "./GreetingManager";
 import { Camera } from "./Camera";
 import { THEME } from "./theme";
@@ -37,6 +41,11 @@ export function DungeonMap() {
   const doorsRef = useRef(new Map<string, BlockedDoor>());    // agentId → door
   const discoveryDoorsRef = useRef(new Map<string, DiscoveryDoor[]>()); // agentId → doors
   const prevDiscoveryCountRef = useRef(new Map<string, number>());
+  const torchesRef = useRef<TorchLight[]>([]);
+  const dayNightRef = useRef<DayNightCycle | null>(null);
+  const fogRef = useRef<FogOfWar | null>(null);
+  const bannersRef = useRef<AchievementBanner[]>([]);
+  const checkedAchievementsRef = useRef(new Map<string, Set<string>>());
   const greetingMgrRef = useRef(new GreetingManager());
   const completedAgentsRef = useRef(new Set<string>());
   const blockedAgentsRef = useRef(new Set<string>());
@@ -124,6 +133,11 @@ export function DungeonMap() {
         }
         world.addChild(grid);
 
+        // Fog of war layer (above grid, below rooms/corridors)
+        const fog = new FogOfWar();
+        world.addChild(fog);
+        fogRef.current = fog;
+
         // Camera
         const camera = new Camera(world, { width: w, height: h }, bgLayer);
         cameraRef.current = camera;
@@ -137,6 +151,11 @@ export function DungeonMap() {
           camera.resize(nw, nh);
         });
         ro.observe(container);
+
+        // Day/Night cycle overlay (topmost world layer)
+        const dayNight = new DayNightCycle(w, h);
+        world.addChild(dayNight);
+        dayNightRef.current = dayNight;
 
         // Ticker
         app.ticker.add((ticker) => {
@@ -214,6 +233,32 @@ export function DungeonMap() {
             if (doors.length === 0) discoveryDoorsRef.current.delete(agentId);
           }
 
+          // Tick torches
+          for (const torch of torchesRef.current) torch.tick(dt);
+
+          // Day/Night cycle + update torch glow
+          const dayNight = dayNightRef.current;
+          if (dayNight) {
+            dayNight.tick(dt);
+            const nightMult = dayNight.getNightMultiplier();
+            for (const torch of torchesRef.current) torch.setNightMultiplier(nightMult);
+          }
+
+          // Tick fog of war
+          if (fogRef.current) fogRef.current.tick(dt);
+
+          // Tick achievement banners, remove done ones
+          const banners = bannersRef.current;
+          for (let i = banners.length - 1; i >= 0; i--) {
+            if (banners[i].isDone()) {
+              world.removeChild(banners[i]);
+              banners[i].destroy();
+              banners.splice(i, 1);
+            } else {
+              banners[i].tick(dt);
+            }
+          }
+
           // Tick loot effects, remove finished ones
           const loots = lootEffectsRef.current;
           for (let i = loots.length - 1; i >= 0; i--) {
@@ -266,6 +311,12 @@ export function DungeonMap() {
       roomsRef.current.clear();
       corridorsRef.current = [];
       spritesRef.current.clear();
+      for (const t of torchesRef.current) t.destroy();
+      torchesRef.current = [];
+      if (dayNightRef.current) { dayNightRef.current.destroy(); dayNightRef.current = null; }
+      if (fogRef.current) { fogRef.current.destroy(); fogRef.current = null; }
+      for (const b of bannersRef.current) b.destroy();
+      bannersRef.current = [];
     };
   }, []);
 
@@ -297,7 +348,7 @@ export function DungeonMap() {
         }
         room.position.set(ln.x - 90, ln.y - 35);
         const aa = agents.get(dn.assignee ?? "");
-        room.update(dn.status, aa?.name, aa?.role);
+        room.update(dn.status, aa?.name, aa?.role, aa?.currentAction);
         // File attention heatmap — rooms glow by agent activity
         room.setHeat(aa?.activityHeat ?? 0);
 
@@ -354,6 +405,44 @@ export function DungeonMap() {
           connectedPairs.add(`${neighbor.nodeId}:${ln.nodeId}`);
           world.addChildAt(c, 1);
         }
+      }
+
+      // Place torches on corridors (2 per corridor at 25%/75% spine)
+      for (const t of torchesRef.current) { world.removeChild(t); t.destroy(); }
+      torchesRef.current = [];
+      for (const corridor of corridorsRef.current) {
+        const STEPS = 24; // matches SPINE_STEPS in Corridor
+        for (const pct of [0.25, 0.75]) {
+          const idx = Math.floor(STEPS * pct);
+          const pt = corridor.getSpinePoint(idx);
+          const nm = corridor.getNormal(idx);
+          if (pt && nm) {
+            const t1 = new TorchLight(pt[0] + nm[0] * 22, pt[1] + nm[1] * 22, false);
+            const t2 = new TorchLight(pt[0] - nm[0] * 22, pt[1] - nm[1] * 22, true);
+            torchesRef.current.push(t1, t2);
+            world.addChildAt(t1, 2);
+            world.addChildAt(t2, 2);
+          }
+        }
+      }
+
+      // Update fog of war
+      const fog = fogRef.current;
+      if (fog) {
+        for (const ln of layout.nodes) fog.setCell(ln.nodeId, ln.x, ln.y);
+        const allVisited = new Set<string>();
+        for (const agent of agents.values()) {
+          if (agent.visitedRooms) {
+            for (const roomId of agent.visitedRooms) allVisited.add(roomId);
+          }
+        }
+        const adjacency = new Map<string, string[]>();
+        for (const ln of layout.nodes) adjacency.set(ln.nodeId, []);
+        for (const key of connectedPairs) {
+          const [a, b] = key.split(":");
+          adjacency.get(a)?.push(b);
+        }
+        fog.updateVisibility(allVisited, adjacency);
       }
 
       // Apply tool flows to corridors — recent flows light up
@@ -590,6 +679,27 @@ export function DungeonMap() {
             }
           }
         }
+
+        // Achievement checks
+        const earned = checkedAchievementsRef.current.get(agent.agentId) ?? new Set<string>();
+        const checkAchievement = (type: AchievementType, condition: boolean) => {
+          if (condition && !earned.has(type)) {
+            earned.add(type);
+            const banner = new AchievementBanner(sp.position.x, sp.position.y, type);
+            bannersRef.current.push(banner);
+            world.addChild(banner);
+            soundManager.playAchievement();
+          }
+        };
+        checkAchievement("first_edit", agent.totalEdits >= 1);
+        checkAchievement("first_build", agent.totalBuilds >= 1);
+        checkAchievement("first_test", agent.totalTests >= 1);
+        checkAchievement("level_5", agent.level >= 5);
+        checkAchievement("level_10", agent.level >= 10);
+        checkAchievement("explorer_10", agent.discoveredPathCount >= 10);
+        checkAchievement("explorer_25", agent.discoveredPathCount >= 25);
+        checkAchievement("error_survivor", (agent.errorCount ?? 0) >= 5 && !agent.isComplete);
+        checkedAchievementsRef.current.set(agent.agentId, earned);
 
         const dn = dag.nodes.find((n) => n.assignee === agent.agentId);
         if (dn) {

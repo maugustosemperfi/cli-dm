@@ -223,6 +223,47 @@ class SoundManager {
       osc.stop(chordStart + 0.5);
     }
   }
+  /**
+   * Ascending pentatonic run with shimmer chord — retro "achievement unlocked" sound.
+   */
+  async playAchievement(): Promise<void> {
+    if (!this.enabled) return;
+    const ctx = await this.getContext();
+    const now = ctx.currentTime;
+
+    // Ascending pentatonic run
+    const notes = [523, 587, 659, 784, 880];
+    const noteDuration = 0.05;
+
+    for (let i = 0; i < notes.length; i++) {
+      const t = now + i * noteDuration;
+      const osc = ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(notes[i], t);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.12, t + 0.005);
+      gain.gain.setValueAtTime(0.12, t + noteDuration - 0.005);
+      gain.gain.linearRampToValueAtTime(0, t + noteDuration + 0.04);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + noteDuration + 0.04);
+    }
+
+    // Sustained shimmer chord
+    const chordStart = now + notes.length * noteDuration;
+    for (const freq of [1047, 1319]) {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq + (Math.random() - 0.5) * 2, chordStart);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.06, chordStart);
+      gain.gain.exponentialRampToValueAtTime(0.001, chordStart + 0.6);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(chordStart);
+      osc.stop(chordStart + 0.6);
+    }
+  }
 }
 
 export const soundManager = new SoundManager();

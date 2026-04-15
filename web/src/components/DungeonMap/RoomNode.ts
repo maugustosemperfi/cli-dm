@@ -2,6 +2,14 @@ import { Container, Graphics, Text, TextStyle } from "pixi.js";
 import type { NodeStatus } from "../../protocol/events";
 import { THEME, ROOM_WIDTH, ROOM_HEIGHT, statusColor, AGENT_HEX } from "./theme";
 
+type RoomDecorType = "bookshelf" | "anvil" | "cauldron" | "scroll_desk" | "terminal" | "crystal" | "portal" | "none";
+
+const ACTION_DECOR: Record<string, RoomDecorType> = {
+  read: "bookshelf", build: "anvil", test: "cauldron", edit: "scroll_desk",
+  shell: "terminal", thinking: "crystal", network: "portal",
+  idle: "none", git: "scroll_desk", error: "none", blocked: "none",
+};
+
 const CORNER_RADIUS = 6;
 const ACCENT_WIDTH = 4;
 
@@ -20,6 +28,8 @@ export class RoomNode extends Container {
   private fireGlow: Graphics;
   private fireIntensity = 0;
   private fireEmbers: Array<{ x: number; y: number; vy: number; life: number; size: number }> = [];
+  private decorGfx: Graphics;
+  private currentDecorAction = "";
 
   constructor(nodeId: string, label: string, x: number, y: number) {
     super();
@@ -80,10 +90,14 @@ export class RoomNode extends Container {
     this.assigneeText.position.set(30, 38);
     this.addChild(this.assigneeText);
 
+    this.decorGfx = new Graphics();
+    this.decorGfx.position.set(ROOM_WIDTH - 40, 14);
+    this.addChild(this.decorGfx);
+
     this.drawRoom(THEME.statusPending);
   }
 
-  update(status: NodeStatus, assigneeName?: string, assigneeRole?: string) {
+  update(status: NodeStatus, assigneeName?: string, assigneeRole?: string, currentAction?: string) {
     this.currentStatus = status;
     const color = statusColor(status);
     this.drawRoom(color);
@@ -93,6 +107,72 @@ export class RoomNode extends Container {
       if (assigneeRole && AGENT_HEX[assigneeRole] !== undefined) {
         this.assigneeText.style.fill = AGENT_HEX[assigneeRole];
       }
+    }
+
+    this.updateDecoration(currentAction);
+  }
+
+  private updateDecoration(action?: string) {
+    const decorType = ACTION_DECOR[action ?? "idle"] ?? "none";
+    if (decorType === this.currentDecorAction) return;
+    this.currentDecorAction = decorType;
+    this.decorGfx.clear();
+
+    switch (decorType) {
+      case "bookshelf":
+        for (let row = 0; row < 3; row++) {
+          const y = row * 8;
+          this.decorGfx.rect(0, y, 20, 1).fill({ color: 0x654321 });
+          for (let b = 0; b < 4; b++) {
+            const bx = 1 + b * 5;
+            const bColor = [0x5b8abf, 0xbf6b5b, 0x8b6baf, 0x5baf7b][b];
+            this.decorGfx.rect(bx, y - 6, 3, 6).fill({ color: bColor, alpha: 0.7 });
+          }
+        }
+        break;
+      case "anvil":
+        this.decorGfx.rect(4, 16, 12, 4).fill({ color: 0x6d6f78 });
+        this.decorGfx.rect(6, 12, 8, 4).fill({ color: 0x5c5e67 });
+        this.decorGfx.rect(2, 10, 16, 2).fill({ color: 0x6d6f78 });
+        this.decorGfx.rect(20, 6, 2, 14).fill({ color: 0x654321 });
+        this.decorGfx.rect(18, 4, 6, 4).fill({ color: 0x6d6f78 });
+        break;
+      case "cauldron":
+        this.decorGfx.circle(10, 14, 8).fill({ color: 0x3f4147 });
+        this.decorGfx.circle(10, 14, 6).fill({ color: 0x5baf7b, alpha: 0.4 });
+        this.decorGfx.rect(4, 20, 2, 4).fill({ color: 0x3f4147 });
+        this.decorGfx.rect(14, 20, 2, 4).fill({ color: 0x3f4147 });
+        this.decorGfx.circle(8, 11, 1.5).fill({ color: 0x5baf7b, alpha: 0.6 });
+        this.decorGfx.circle(12, 10, 1).fill({ color: 0x5baf7b, alpha: 0.5 });
+        break;
+      case "scroll_desk":
+        this.decorGfx.rect(0, 14, 22, 3).fill({ color: 0x654321 });
+        this.decorGfx.rect(2, 17, 2, 8).fill({ color: 0x654321 });
+        this.decorGfx.rect(18, 17, 2, 8).fill({ color: 0x654321 });
+        this.decorGfx.rect(4, 10, 14, 4).fill({ color: 0xd4c5a0, alpha: 0.8 });
+        this.decorGfx.rect(18, 6, 1, 8).fill({ color: 0xdbdee1, alpha: 0.6 });
+        break;
+      case "terminal":
+        this.decorGfx.rect(2, 4, 16, 12).fill({ color: 0x3f4147 });
+        this.decorGfx.rect(4, 6, 12, 8).fill({ color: 0x1a1c1e });
+        this.decorGfx.rect(6, 10, 4, 2).fill({ color: 0x5baf7b, alpha: 0.7 });
+        this.decorGfx.rect(6, 16, 8, 2).fill({ color: 0x3f4147 });
+        this.decorGfx.rect(4, 18, 12, 2).fill({ color: 0x3f4147 });
+        break;
+      case "crystal":
+        this.decorGfx.rect(6, 16, 8, 4).fill({ color: 0x654321 });
+        this.decorGfx.circle(10, 12, 6).fill({ color: 0x8b6baf, alpha: 0.3 });
+        this.decorGfx.circle(10, 12, 4).fill({ color: 0x8b6baf, alpha: 0.5 });
+        this.decorGfx.circle(8, 10, 1.5).fill({ color: 0xdbdee1, alpha: 0.4 });
+        break;
+      case "portal":
+        this.decorGfx.circle(10, 12, 8).stroke({ color: 0x8b6baf, width: 1.5, alpha: 0.4 });
+        this.decorGfx.circle(10, 12, 5).stroke({ color: 0x8b6baf, width: 1, alpha: 0.3 });
+        for (let i = 0; i < 4; i++) {
+          const a = (Math.PI * 2 * i) / 4;
+          this.decorGfx.circle(10 + Math.cos(a) * 6, 12 + Math.sin(a) * 6, 1).fill({ color: 0x8b6baf, alpha: 0.5 });
+        }
+        break;
     }
   }
 

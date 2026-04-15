@@ -112,6 +112,12 @@ const BOSS_COLORS: Record<BossType, number> = {
   golem: 0x6d6f78,
 };
 
+const BOSS_NAMES: Record<BossType, string> = {
+  dragon: "Firebreather",
+  skeleton: "Bone Lord",
+  golem: "Stone Guardian",
+};
+
 interface BossParticle {
   x: number;
   y: number;
@@ -154,6 +160,11 @@ export class BossEncounter extends Container {
   private attackInterval = 120; // every ~2s
   private particles: BossParticle[] = [];
   private bossColor: number;
+  private bossNameText: Text;
+  private hpText: Text;
+  private enrageGlowGfx: Graphics;
+  private damageFlashTimer = 0;
+  private readonly maxHpDisplay = 100;
 
   constructor(x: number, y: number, bossType: BossType) {
     super();
@@ -185,6 +196,28 @@ export class BossEncounter extends Container {
     this.healthBarFill = new Graphics();
     this.addChild(this.healthBarFill);
 
+    // Boss name above health bar
+    this.bossNameText = new Text({
+      text: BOSS_NAMES[bossType],
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 8, fill: this.bossColor, fontWeight: "bold" }),
+    });
+    this.bossNameText.anchor.set(0.5, 1);
+    this.bossNameText.position.set(24, -16);
+    this.addChild(this.bossNameText);
+
+    // HP text
+    this.hpText = new Text({
+      text: "100 / 100",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 7, fill: 0xdbdee1 }),
+    });
+    this.hpText.anchor.set(0.5, 0);
+    this.hpText.position.set(24, -4);
+    this.addChild(this.hpText);
+
+    // Enrage glow (behind everything)
+    this.enrageGlowGfx = new Graphics();
+    this.addChildAt(this.enrageGlowGfx, 0);
+
     // Slash effect layer
     this.slashGfx = new Graphics();
     this.addChild(this.slashGfx);
@@ -200,6 +233,7 @@ export class BossEncounter extends Container {
     if (this.done) return;
 
     this.time += dt;
+    if (this.damageFlashTimer > 0) this.damageFlashTimer -= dt;
 
     if (this.resolving) {
       this.tickDeath(dt);
@@ -292,6 +326,9 @@ export class BossEncounter extends Container {
     this.healthBarBg.alpha = Math.max(0, 1 - progress * 3);
     this.healthBarFill.alpha = Math.max(0, 1 - progress * 3);
     this.glowGfx.alpha = Math.max(0, 1 - progress * 2);
+    this.bossNameText.alpha = Math.max(0, 1 - progress * 3);
+    this.hpText.alpha = Math.max(0, 1 - progress * 3);
+    this.enrageGlowGfx.alpha = Math.max(0, 1 - progress * 2);
 
     this.tickParticles(dt);
 
@@ -310,9 +347,34 @@ export class BossEncounter extends Container {
 
   private updateHealthBar(): void {
     this.healthBarFill.clear();
-    const width = Math.max(0, 48 * this.health);
-    const color = this.health > 0.5 ? 0xbf6b5b : this.health > 0.25 ? 0xbfa85b : 0xff3333;
-    this.healthBarFill.rect(0, -10, width, 2).fill({ color });
+    const barWidth = 48;
+    const fillWidth = Math.max(0, barWidth * this.health);
+    const color = this.health > 0.5 ? 0x5baf7b : this.health > 0.25 ? 0xbfa85b : 0xff3333;
+
+    this.healthBarFill.rect(0, -10, fillWidth, 2).fill({ color });
+
+    // Phase tick marks at 75%, 50%, 25%
+    for (const pct of [0.75, 0.50, 0.25]) {
+      const tx = barWidth * pct;
+      this.healthBarFill.moveTo(tx, -12).lineTo(tx, -8).stroke({ color: 0x666666, width: 1, alpha: 0.6 });
+    }
+
+    // HP text
+    const currentHP = Math.max(0, Math.round(this.health * this.maxHpDisplay));
+    this.hpText.text = `${currentHP} / ${this.maxHpDisplay}`;
+
+    // Damage flash
+    if (this.damageFlashTimer > 0) {
+      const flashAlpha = this.damageFlashTimer / 8;
+      this.healthBarFill.rect(0, -10, fillWidth, 2).fill({ color: 0xffffff, alpha: flashAlpha * 0.5 });
+    }
+
+    // Enrage glow below 25%
+    this.enrageGlowGfx.clear();
+    if (this.health <= 0.25 && this.health > 0) {
+      const pulseAlpha = 0.08 + Math.sin(this.time * 0.1) * 0.06;
+      this.enrageGlowGfx.circle(24, 16, 35).fill({ color: 0xff3333, alpha: pulseAlpha });
+    }
   }
 
   private spawnSlashEffect(): void {
@@ -350,6 +412,7 @@ export class BossEncounter extends Container {
       life: 40,
     };
     this.damageNumbers.push(dmg);
+    this.damageFlashTimer = 8;
 
     const text = new Text({
       text: `-${value}`,

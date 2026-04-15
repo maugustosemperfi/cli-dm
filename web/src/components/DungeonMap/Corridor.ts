@@ -24,6 +24,7 @@ export class Corridor extends Graphics {
   private fireParticles: Array<{ t: number; vy: number; life: number; x: number }> = [];
   private flowIntensity = 0;
   private fireIntensity = 0;
+  private accumulatedHeat = 0;
   /** Precomputed spine points for the corridor curve */
   private spine: Array<[number, number]> = [];
 
@@ -33,6 +34,21 @@ export class Corridor extends Graphics {
     this.toNode = to;
     this.computeSpine();
     this.draw(THEME.corridorDefault, false);
+  }
+
+  /** Get accumulated traffic heat (0-1) */
+  get heat(): number { return this.accumulatedHeat; }
+
+  /** Get spine point by index (0 to SPINE_STEPS) for torch placement */
+  getSpinePoint(index: number): [number, number] | null {
+    if (index < 0 || index >= this.spine.length) return null;
+    return this.spine[index];
+  }
+
+  /** Get normal direction at spine index for torch offset */
+  getNormal(index: number): [number, number] | null {
+    if (index < 0 || index >= this.spine.length) return null;
+    return this.normalAt(index);
   }
 
   update(fromStatus: NodeStatus, toStatus: NodeStatus, isBlocked: boolean) {
@@ -55,6 +71,7 @@ export class Corridor extends Graphics {
   /** Add tool flow energy — particles travel along the corridor */
   addFlow(agentRole?: string) {
     this.flowIntensity = Math.min(1, this.flowIntensity + 0.3);
+    this.accumulatedHeat = Math.min(1, this.accumulatedHeat + 0.02);
     const color = agentRole ? (AGENT_HEX[agentRole] ?? THEME.corridorActive) : THEME.corridorActive;
     const count = 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < count; i++) {
@@ -92,6 +109,7 @@ export class Corridor extends Graphics {
 
     this.flowIntensity *= 0.995;
     this.fireIntensity *= 0.99;
+    this.accumulatedHeat *= 0.9995;
 
     let needsRedraw = false;
     for (let i = this.flowParticles.length - 1; i >= 0; i--) {
@@ -301,6 +319,17 @@ export class Corridor extends Graphics {
         this.lineTo(this.spine[i][0], this.spine[i][1]);
       }
       this.stroke({ color: 0xbf6b5b, width: CORRIDOR_HALF_W + this.fireIntensity * 6, alpha: this.fireIntensity * 0.2 });
+    }
+
+    // --- Corridor traffic heatmap ---
+    if (this.accumulatedHeat > 0.02) {
+      const heatColor = this.accumulatedHeat < 0.33 ? 0x5b8abf
+        : this.accumulatedHeat < 0.66 ? 0xbfa85b : 0xbf6b5b;
+      this.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        this.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      this.stroke({ color: heatColor, width: CORRIDOR_HALF_W * 0.8, alpha: this.accumulatedHeat * 0.12 });
     }
 
     // --- Blocked marker: X at midpoint ---

@@ -50,6 +50,9 @@ type JSONLWatcher struct {
 
 	// Inferred activity: detect when model is generating but JSONL is silent
 	inferStates map[string]*inferredState
+
+	// Stale detection: avoid re-emitting idle every sweep cycle
+	staleEmitted bool
 }
 
 // NewJSONLWatcher creates a watcher for the given JSONL file path.
@@ -128,30 +131,31 @@ func (w *JSONLWatcher) watchLoop() {
 }
 
 // sweepStale checks if the JSONL file has been modified recently.
-// If not, marks the main agent as "left the dungeon" (session abandoned).
+// If not, transitions the agent to idle (not complete) so it can wake up
+// when new activity arrives.
 func (w *JSONLWatcher) sweepStale() {
+	if w.staleEmitted {
+		return
+	}
 	info, err := os.Stat(w.filePath)
 	if err != nil {
 		return
 	}
-	// If file hasn't been modified in 5 minutes, session is likely abandoned
+	// If file hasn't been modified in 5 minutes, transition to idle
 	if time.Since(info.ModTime()) > 5*time.Minute {
-		// Emit completion event for main agent (if not already completed)
-		state := w.mp.GetState(w.agentID)
-		if state == nil {
-			return
-		}
-		ev, err := protocol.NewEvent(protocol.AgentComplete{
-			Type:     protocol.TypeAgentComplete,
+		// Route through mapper so internal state stays consistent
+		te := mapper.ToolEvent{
+			Kind:     mapper.ToolEnd,
 			AgentID:  w.agentID,
-			ExitCode: 0,
-			Ts:       protocol.NowMs(),
-		})
-		if err == nil {
+			ToolName: "__stale__",
+		}
+		events := w.mp.Map(te)
+		for _, ev := range events {
 			w.eventSink(ev)
 		}
-		w.emitRawOutput("\033[90m— session appears abandoned (no activity for 5 min) —\033[0m\r\n")
-		w.logger.Info("session appears stale", "path", w.filePath, "agent", w.agentID)
+		w.staleEmitted = true
+		w.emitRawOutput("\033[90m— session idle (no activity for 5 min) —\033[0m\r\n")
+		w.logger.Info("session idle", "path", w.filePath, "agent", w.agentID)
 	}
 }
 
@@ -195,6 +199,9 @@ func (w *JSONLWatcher) poll() {
 	}
 
 	w.offset += int64(len(data))
+
+	// New data arrived — agent is alive, reset stale flag
+	w.staleEmitted = false
 
 	// Split into lines and process each complete line
 	lines := bytes.Split(data, []byte("\n"))

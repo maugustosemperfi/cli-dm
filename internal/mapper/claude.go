@@ -39,12 +39,22 @@ type ToolEvent struct {
 type Mapper struct {
 	mu     sync.Mutex
 	states map[string]*parser.AgentState
+	// Subagent tracking: toolUseID → subagentID for Agent tool calls
+	activeSubagents map[string]string
+	subCount        int
+}
+
+// subagentRoles for round-robin assignment
+var mapperSubRoles = []protocol.AgentRole{
+	protocol.RoleRogue, protocol.RoleMage, protocol.RoleRanger,
+	protocol.RoleCleric, protocol.RoleBard,
 }
 
 // New creates a new Mapper.
 func New() *Mapper {
 	return &Mapper{
-		states: make(map[string]*parser.AgentState),
+		states:          make(map[string]*parser.AgentState),
+		activeSubagents: make(map[string]string),
 	}
 }
 
@@ -82,7 +92,35 @@ func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
 	state := m.GetState(te.AgentID)
 	action, detail := mapToolName(te.ToolName, te.Input)
 	r := state.Transition(action, detail)
-	return r.Events
+	events := r.Events
+
+	// Agent tool → spawn a subagent character on the map
+	if te.ToolName == "Agent" && te.ToolUseID != "" {
+		name := extractString(te.Input, "name")
+		if name == "" {
+			name = extractString(te.Input, "description")
+		}
+		if name == "" {
+			name = fmt.Sprintf("subagent-%d", m.subCount+1)
+		}
+		subID := te.AgentID + ":" + name
+		role := mapperSubRoles[m.subCount%len(mapperSubRoles)]
+		m.subCount++
+
+		spawnEv, err := protocol.NewEvent(protocol.AgentSpawn{
+			Type:    protocol.TypeAgentSpawn,
+			AgentID: subID,
+			Name:    name,
+			Role:    role,
+			Ts:      protocol.NowMs(),
+		})
+		if err == nil {
+			events = append(events, spawnEv)
+		}
+		m.activeSubagents[te.ToolUseID] = subID
+	}
+
+	return events
 }
 
 func (m *Mapper) handleToolEnd(te ToolEvent) []protocol.Event {
@@ -101,6 +139,22 @@ func (m *Mapper) handleToolEnd(te ToolEvent) []protocol.Event {
 			events = append(events, state.MarkBlocked(protocol.BlockerTimeout, "", truncate(output, 200)))
 		default:
 			events = append(events, state.MarkError(truncate(output, 200)))
+		}
+	}
+
+	// Complete subagent if this tool_result is for an Agent tool call
+	if te.ToolUseID != "" {
+		if subID, ok := m.activeSubagents[te.ToolUseID]; ok {
+			completeEv, err := protocol.NewEvent(protocol.AgentComplete{
+				Type:     protocol.TypeAgentComplete,
+				AgentID:  subID,
+				ExitCode: 0,
+				Ts:       protocol.NowMs(),
+			})
+			if err == nil {
+				events = append(events, completeEv)
+			}
+			delete(m.activeSubagents, te.ToolUseID)
 		}
 	}
 
