@@ -52,6 +52,10 @@ export interface AgentState extends AgentSnapshot {
   tokens: number;
   prevLevel: number; // to detect level-ups
   activityHeat: number; // rolling activity counter for heatmap glow
+  // Discovery doors — directories the agent has visited
+  discoveredPaths: Set<string>;
+  discoveredPathCount: number;
+  lastDiscoveredPath?: string;
 }
 
 export interface EventLogEntry {
@@ -186,6 +190,9 @@ export const useGameState = create<GameState>((set, get) => ({
             tokens: existing?.tokens ?? 0,
             prevLevel: existing?.prevLevel ?? 1,
             activityHeat: existing?.activityHeat ?? 0,
+            discoveredPaths: existing?.discoveredPaths ?? new Set(),
+            discoveredPathCount: existing?.discoveredPathCount ?? 0,
+            lastDiscoveredPath: existing?.lastDiscoveredPath,
           });
         }
         set({ agents, dag: event.dag });
@@ -209,6 +216,8 @@ export const useGameState = create<GameState>((set, get) => ({
           tokens: 0,
           prevLevel: 1,
           activityHeat: 0,
+          discoveredPaths: new Set(),
+          discoveredPathCount: 0,
         });
         set({ agents });
         pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
@@ -288,11 +297,31 @@ export const useGameState = create<GameState>((set, get) => ({
         const agent = agents.get(event.agentId);
         if (agent) {
           const prevAction = agent.currentAction;
+
+          // Discovery tracking — detect new directories on read/edit
+          let { discoveredPaths, discoveredPathCount, lastDiscoveredPath } = agent;
+          if ((event.action === "read" || event.action === "edit") && event.detail) {
+            const parts = event.detail.split("/");
+            if (parts.length > 1) {
+              const dir = parts.slice(0, -1).join("/");
+              if (dir && !discoveredPaths.has(dir)) {
+                discoveredPaths = new Set(discoveredPaths);
+                discoveredPaths.add(dir);
+                discoveredPathCount = discoveredPaths.size;
+                const segments = dir.split("/").filter(Boolean);
+                lastDiscoveredPath = segments.slice(-2).join("/");
+              }
+            }
+          }
+
           agents.set(event.agentId, {
             ...agent,
             currentAction: event.action,
             currentDetail: event.detail,
             activityHeat: agent.activityHeat + 1,
+            discoveredPaths,
+            discoveredPathCount,
+            lastDiscoveredPath,
           });
           set({ agents });
 

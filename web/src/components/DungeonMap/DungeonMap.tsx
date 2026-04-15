@@ -13,6 +13,7 @@ import { AmbientCreature, type CreatureType } from "./AmbientCreature";
 import { BossEncounter, type BossType } from "./BossEncounter";
 import { CompanionPet, petTypeForRole } from "./CompanionPet";
 import { BlockedDoor } from "./BlockedDoor";
+import { DiscoveryDoor } from "./DiscoveryDoor";
 import { GreetingManager } from "./GreetingManager";
 import { Camera } from "./Camera";
 import { THEME } from "./theme";
@@ -34,6 +35,8 @@ export function DungeonMap() {
   const bossesRef = useRef(new Map<string, BossEncounter>()); // agentId → boss
   const petsRef = useRef(new Map<string, CompanionPet>());    // agentId → pet
   const doorsRef = useRef(new Map<string, BlockedDoor>());    // agentId → door
+  const discoveryDoorsRef = useRef(new Map<string, DiscoveryDoor[]>()); // agentId → doors
+  const prevDiscoveryCountRef = useRef(new Map<string, number>());
   const greetingMgrRef = useRef(new GreetingManager());
   const completedAgentsRef = useRef(new Set<string>());
   const blockedAgentsRef = useRef(new Set<string>());
@@ -197,6 +200,20 @@ export function DungeonMap() {
             }
           }
 
+          // Tick discovery doors, remove done ones
+          for (const [agentId, doors] of discoveryDoorsRef.current) {
+            for (let i = doors.length - 1; i >= 0; i--) {
+              if (doors[i].isDone()) {
+                world.removeChild(doors[i]);
+                doors[i].destroy();
+                doors.splice(i, 1);
+              } else {
+                doors[i].tick(dt);
+              }
+            }
+            if (doors.length === 0) discoveryDoorsRef.current.delete(agentId);
+          }
+
           // Tick loot effects, remove finished ones
           const loots = lootEffectsRef.current;
           for (let i = loots.length - 1; i >= 0; i--) {
@@ -317,45 +334,25 @@ export function DungeonMap() {
         world.addChildAt(c, 1);
       }
 
-      // Proximity corridors — connect adjacent rooms that have no DAG edge.
-      // Sort by layer then index, connect consecutive nodes in the same layer.
-      const sorted = [...layout.nodes].sort((a, b) => a.layer - b.layer || a.index - b.index);
-      for (let i = 0; i < sorted.length - 1; i++) {
-        const a = sorted[i];
-        const b = sorted[i + 1];
-        if (a.layer !== b.layer) continue; // only same-layer neighbors
-        const key = `${a.nodeId}:${b.nodeId}`;
-        if (connectedPairs.has(key)) continue; // already have a DAG corridor
-        const c = new Corridor(a, b);
-        // Proximity corridors use default (dim) styling
-        corridorsRef.current.push(c);
-        corridorMap.set(key, c);
-        corridorMap.set(`${b.nodeId}:${a.nodeId}`, c);
-        connectedPairs.add(key);
-        connectedPairs.add(`${b.nodeId}:${a.nodeId}`);
-        world.addChildAt(c, 1);
+      // Grid-adjacency corridors — connect 4-directional neighbors
+      const gridLookup = new Map<string, typeof layout.nodes[0]>();
+      for (const ln of layout.nodes) {
+        gridLookup.set(`${ln.gridCol},${ln.gridRow}`, ln);
       }
-      // Also connect across layers if there are multiple layers with no edges
-      // (e.g., orphan nodes in different layers)
-      for (let i = 0; i < sorted.length; i++) {
-        for (let j = i + 1; j < sorted.length; j++) {
-          const a = sorted[i];
-          const b = sorted[j];
-          if (a.layer === b.layer) continue; // already handled above
-          // Only connect if neither node has ANY corridor yet
-          const aHas = [...connectedPairs].some((k) => k.startsWith(a.nodeId + ":"));
-          const bHas = [...connectedPairs].some((k) => k.startsWith(b.nodeId + ":"));
-          if (aHas && bHas) continue;
-          const key = `${a.nodeId}:${b.nodeId}`;
+      const directions: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (const ln of layout.nodes) {
+        for (const [dc, dr] of directions) {
+          const neighbor = gridLookup.get(`${ln.gridCol + dc},${ln.gridRow + dr}`);
+          if (!neighbor) continue;
+          const key = `${ln.nodeId}:${neighbor.nodeId}`;
           if (connectedPairs.has(key)) continue;
-          const c = new Corridor(a, b);
+          const c = new Corridor(ln, neighbor);
           corridorsRef.current.push(c);
           corridorMap.set(key, c);
-          corridorMap.set(`${b.nodeId}:${a.nodeId}`, c);
+          corridorMap.set(`${neighbor.nodeId}:${ln.nodeId}`, c);
           connectedPairs.add(key);
-          connectedPairs.add(`${b.nodeId}:${a.nodeId}`);
+          connectedPairs.add(`${neighbor.nodeId}:${ln.nodeId}`);
           world.addChildAt(c, 1);
-          break; // one cross-layer connection per orphan is enough
         }
       }
 
@@ -552,6 +549,46 @@ export function DungeonMap() {
           world.addChild(boss);
           spawnCreaturesNear(sp.position.x, sp.position.y, 3);
           creatureSpawnCooldownRef.current.set(agent.agentId, now);
+        }
+
+        // Discovery doors — spawn when agent discovers a new directory
+        const prevDiscCount = prevDiscoveryCountRef.current.get(agent.agentId) ?? 0;
+        if (agent.discoveredPathCount > prevDiscCount) {
+          prevDiscoveryCountRef.current.set(agent.agentId, agent.discoveredPathCount);
+
+          const agentDn = dag.nodes.find((n) => n.assignee === agent.agentId);
+          if (agentDn) {
+            // Pick a neighbor corridor to place the door on
+            for (const key of connectedPairs) {
+              const [fromId, toId] = key.split(":");
+              if (fromId !== agentDn.nodeId) continue;
+              const fromLn = layout.nodes.find((n) => n.nodeId === fromId);
+              const toLn = layout.nodes.find((n) => n.nodeId === toId);
+              if (!fromLn || !toLn) continue;
+
+              const midX = (fromLn.x + toLn.x) / 2;
+              const midY = (fromLn.y + toLn.y) / 2;
+              const angle = Math.atan2(toLn.y - fromLn.y, toLn.x - fromLn.x);
+              const dirName = agent.lastDiscoveredPath ?? "unknown";
+              const door = new DiscoveryDoor(midX, midY, angle, dirName);
+
+              let agentDoors = discoveryDoorsRef.current.get(agent.agentId);
+              if (!agentDoors) {
+                agentDoors = [];
+                discoveryDoorsRef.current.set(agent.agentId, agentDoors);
+              }
+
+              // Cap at 3 doors — force-fade oldest when 4th spawns
+              while (agentDoors.length >= 3) {
+                const oldest = agentDoors.shift()!;
+                oldest.forceFade();
+              }
+
+              agentDoors.push(door);
+              world.addChild(door);
+              break; // one door per discovery event
+            }
+          }
         }
 
         const dn = dag.nodes.find((n) => n.assignee === agent.agentId);

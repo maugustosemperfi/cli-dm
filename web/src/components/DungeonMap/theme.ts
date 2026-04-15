@@ -50,3 +50,7 @@ export const ROOM_HEIGHT = 70;
 export const LAYER_SPACING = 450;
 export const NODE_SPACING = 220;
 export const PADDING = 180;
+
+// 2D grid layout spacing
+export const GRID_COL_SPACING = 350;
+export const GRID_ROW_SPACING = 250;
