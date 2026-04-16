@@ -3,7 +3,7 @@ import { Application, Container, Graphics } from "pixi.js";
 import { useGameState } from "../../stores/gameState";
 import type { DAGSnapshot } from "../../protocol/events";
 import type { AgentState } from "../../stores/gameState";
-import { computeLayout } from "./layout";
+import { computeLayout, type NodeWeight } from "./layout";
 import { RoomNode } from "./RoomNode";
 import { AgentSprite, setCharacterRenderer } from "./AgentSprite";
 import { CharacterRenderer } from "./sprites/CharacterRenderer";
@@ -52,6 +52,7 @@ export function DungeonMap() {
   const prevActionsRef = useRef(new Map<string, string>()); // agentId → last action
   const creatureSpawnCooldownRef = useRef(new Map<string, number>()); // agentId → timestamp
   const spawnLinksRef = useRef(new Map<string, SpawnLink>());
+  const prevNodeIdsRef = useRef(new Set<string>());
   const [error, setError] = useState<string | null>(null);
 
   const dag = useGameState((s) => s.dag);
@@ -354,7 +355,23 @@ export function DungeonMap() {
       const world = worldRef.current;
       if (!world) return;
 
-      const layout = computeLayout(dag);
+      // Build weight hints from room metrics for organic sizing
+      const nodeWeights: NodeWeight[] = [];
+      if (roomMetrics.size > 0) {
+        let maxTokens = 1;
+        for (const m of roomMetrics.values()) maxTokens = Math.max(maxTokens, m.totalTokens);
+        for (const [nodeId, m] of roomMetrics) {
+          nodeWeights.push({ nodeId, weight: Math.min(1, m.totalTokens / maxTokens) });
+        }
+      }
+
+      const layout = computeLayout(dag, nodeWeights, prevNodeIdsRef.current);
+
+      // Update prevNodeIds for next frame's new-node detection
+      const currentNodeIds = new Set<string>();
+      for (const ln of layout.nodes) currentNodeIds.add(ln.nodeId);
+      prevNodeIdsRef.current = currentNodeIds;
+
       const rooms = roomsRef.current;
       const sprites = spritesRef.current;
       const seen = new Set<string>();
@@ -373,8 +390,22 @@ export function DungeonMap() {
           });
           rooms.set(ln.nodeId, room);
           world.addChild(room);
+          // Growth animation for new rooms
+          if (ln.isNew) {
+            room.alpha = 0;
+            room.scale.set(0.3);
+          }
         }
         room.position.set(ln.x - 90, ln.y - 35);
+        // Organic scale — lerp toward target for smooth transitions
+        const targetScale = ln.scale;
+        const curScale = room.scale.x;
+        const newScale = curScale + (targetScale - curScale) * 0.08;
+        room.scale.set(newScale);
+        // Growth fade-in
+        if (room.alpha < 1) {
+          room.alpha = Math.min(1, room.alpha + 0.04);
+        }
         const aa = agents.get(dn.assignee ?? "");
         room.update(dn.status, aa?.name, aa?.role, aa?.currentAction);
         // Building tier from agent level
