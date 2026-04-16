@@ -26,6 +26,11 @@ const (
 	TypeStateSnapshot = "state.snapshot"
 
 	TypeAgentStats = "agent.stats"
+
+	// Command events (browser → server)
+	TypeCmdAgentKill    = "cmd.agent.kill"
+	TypeCmdAgentMessage = "cmd.agent.message"
+	TypeCmdAgentSignal  = "cmd.agent.signal"
 )
 
 // ActionType enumerates what an agent can be doing
@@ -292,4 +297,26 @@ func NewEvent(v any) (Event, error) {
 
 func NowMs() int64 {
 	return nowMs()
+}
+
+// --- Command events (browser → server) ---
+
+type CmdAgentKill struct {
+	Type    string `json:"type"`
+	AgentID string `json:"agentId"`
+	Ts      int64  `json:"ts"`
+}
+
+type CmdAgentMessage struct {
+	Type    string `json:"type"`
+	AgentID string `json:"agentId"`
+	Message string `json:"message"`
+	Ts      int64  `json:"ts"`
+}
+
+type CmdAgentSignal struct {
+	Type    string `json:"type"`
+	AgentID string `json:"agentId"`
+	Signal  string `json:"signal"` // "interrupt", "resume"
+	Ts      int64  `json:"ts"`
 }

@@ -21,15 +21,19 @@ type EventStore interface {
 // SnapshotFunc returns the current full state for late-joining clients
 type SnapshotFunc func() protocol.StateSnapshot
 
+// CommandHandler processes commands received from browser clients.
+type CommandHandler func(cmdType string, data json.RawMessage) error
+
 // Hub manages WebSocket connections and broadcasts events
 type Hub struct {
-	mu          sync.RWMutex
-	clients     map[*wsClient]struct{}
-	snapshotFn  SnapshotFunc
-	logger      *slog.Logger
-	eventBuffer []protocol.Event // Ring buffer of recent events for replay
-	bufferMax   int
-	eventStore  EventStore // optional session persistence
+	mu             sync.RWMutex
+	clients        map[*wsClient]struct{}
+	snapshotFn     SnapshotFunc
+	logger         *slog.Logger
+	eventBuffer    []protocol.Event // Ring buffer of recent events for replay
+	bufferMax      int
+	eventStore     EventStore     // optional session persistence
+	commandHandler CommandHandler // optional handler for browser commands
 }
 
 type wsClient struct {
@@ -54,6 +58,13 @@ func (h *Hub) SetEventStore(store EventStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.eventStore = store
+}
+
+// SetCommandHandler registers a handler for browser-to-server commands.
+func (h *Hub) SetCommandHandler(handler CommandHandler) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.commandHandler = handler
 }
 
 // Broadcast sends an event to all connected clients
@@ -163,14 +174,35 @@ func (h *Hub) writePump(c *wsClient) {
 	}
 }
 
-// readPump reads from the WebSocket (mainly to detect disconnects)
+// readPump reads from the WebSocket and routes commands to the handler.
 func (h *Hub) readPump(c *wsClient) {
 	for {
-		_, _, err := c.conn.Read(context.Background())
+		_, data, err := c.conn.Read(context.Background())
 		if err != nil {
 			return
 		}
-		// We don't process incoming messages from the browser (yet)
+
+		// Parse the command type
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			h.logger.Debug("ignoring malformed client message", "error", err)
+			continue
+		}
+
+		h.mu.RLock()
+		handler := h.commandHandler
+		h.mu.RUnlock()
+
+		if handler == nil {
+			h.logger.Debug("no command handler registered, ignoring", "type", envelope.Type)
+			continue
+		}
+
+		if err := handler(envelope.Type, data); err != nil {
+			h.logger.Error("command handler failed", "type", envelope.Type, "error", err)
+		}
 	}
 }
 

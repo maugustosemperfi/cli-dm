@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { DungeonMap } from "./components/DungeonMap/DungeonMap";
 import { StatusBar } from "./components/StatusBar/StatusBar";
@@ -6,14 +7,20 @@ import { AgentSidebar } from "./components/AgentSidebar/AgentSidebar";
 import { LiveFeed } from "./components/LiveFeed/LiveFeed";
 import { ScoreScreen } from "./components/ScoreScreen/ScoreScreen";
 import { QuestLog } from "./components/QuestLog/QuestLog";
+import { CommandPalette } from "./components/DungeonMap/CommandPalette";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/api/ws`;
 
+type SendCommandFn = (type: string, payload: Record<string, unknown>) => void;
+export const CommandContext = createContext<SendCommandFn>(() => {});
+export const useCommand = () => useContext(CommandContext);
+
 export function App() {
-  useWebSocket({ url: WS_URL });
+  const { sendCommand } = useWebSocket({ url: WS_URL });
 
   return (
+    <CommandContext.Provider value={sendCommand}>
     <div
       style={{
         display: "grid",
@@ -60,6 +67,10 @@ export function App() {
 
       {/* Quest Log sidebar + Volume Controls (fixed overlay) */}
       <QuestLog />
+
+      {/* Command Palette — appears when right-clicking rooms */}
+      <CommandPalette />
     </div>
+    </CommandContext.Provider>
   );
 }

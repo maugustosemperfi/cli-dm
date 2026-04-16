@@ -369,6 +369,34 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Create process manager
 	mgr = ingestion.NewManager(eventSink, logger)
 
+	// Register command handler for browser-to-server commands
+	hub.SetCommandHandler(func(cmdType string, data json.RawMessage) error {
+		switch cmdType {
+		case protocol.TypeCmdAgentKill:
+			var cmd protocol.CmdAgentKill
+			if err := json.Unmarshal(data, &cmd); err != nil {
+				return fmt.Errorf("parsing kill command: %w", err)
+			}
+			logger.Info("command: kill agent", "agentId", cmd.AgentID)
+			return mgr.KillAgent(cmd.AgentID)
+
+		case protocol.TypeCmdAgentSignal:
+			var cmd protocol.CmdAgentSignal
+			if err := json.Unmarshal(data, &cmd); err != nil {
+				return fmt.Errorf("parsing signal command: %w", err)
+			}
+			logger.Info("command: signal agent", "agentId", cmd.AgentID, "signal", cmd.Signal)
+			if cmd.Signal == "interrupt" {
+				return mgr.KillAgent(cmd.AgentID) // simplified: interrupt = kill for now
+			}
+			return nil
+
+		default:
+			logger.Debug("unknown command type", "type", cmdType)
+			return nil
+		}
+	})
+
 	// Default roles for round-robin assignment
 	defaultRoles := []protocol.AgentRole{
 		protocol.RoleWarrior,

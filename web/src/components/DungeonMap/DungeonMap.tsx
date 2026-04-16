@@ -388,6 +388,19 @@ export function DungeonMap() {
           room.on("pointertap", () => {
             if (dn.assignee) selectAgent(dn.assignee);
           });
+          room.on("rightclick", (e: any) => {
+            e.preventDefault?.();
+            const aa = agents.get(dn.assignee ?? "");
+            window.dispatchEvent(new CustomEvent("cli-dm:command-palette", {
+              detail: {
+                x: e.globalX ?? e.clientX ?? 300,
+                y: e.globalY ?? e.clientY ?? 300,
+                agentId: dn.assignee ?? null,
+                agentName: aa?.name ?? dn.label,
+                nodeId: dn.nodeId,
+              },
+            }));
+          });
           rooms.set(ln.nodeId, room);
           world.addChild(room);
           // Growth animation for new rooms
