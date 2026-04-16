@@ -1,6 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import type { TranscriptEntry } from "../../stores/gameState";
+import { SearchBar } from "./SearchBar";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -61,12 +62,31 @@ function entryMessage(entry: TranscriptEntry): { text: string; dim: boolean } {
 
 // ── sub-components ───────────────────────────────────────────────────────────
 
+// Highlight matching text within a string
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx < 0) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <span style={{ background: "#fff3cd", color: "#3e2723", borderRadius: 2, padding: "0 1px" }}>
+        {text.slice(idx, idx + query.length)}
+      </span>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
 interface FeedRowProps {
   entry: TranscriptEntry;
   index: number;
+  searchQuery?: string;
+  isMatch?: boolean;
+  onJump?: () => void;
 }
 
-function FeedRow({ entry, index }: FeedRowProps) {
+function FeedRow({ entry, index, searchQuery, isMatch, onJump }: FeedRowProps) {
   const baseMeta = KIND_META[entry.kind] ?? KIND_META.thinking;
   const { text, dim } = entryMessage(entry);
   const roleColor = AGENT_COLORS[entry.agentRole ?? ""] ?? "#8b9aab";
@@ -81,8 +101,9 @@ function FeedRow({ entry, index }: FeedRowProps) {
     : baseMeta;
   const textColor = isStdout ? "#9a9da1" : isStderr ? "#bf6b5b" : dim ? "#6d6f78" : "#dbdee1";
 
-  const rowBg =
-    index % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)";
+  const rowBg = isMatch
+    ? "rgba(255,243,205,0.08)"
+    : index % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)";
 
   return (
     <div
@@ -90,7 +111,7 @@ function FeedRow({ entry, index }: FeedRowProps) {
         display: "flex",
         alignItems: "center",
         padding: "2px 8px",
-        borderLeft: `2px solid ${meta.borderColor}`,
+        borderLeft: `2px solid ${isMatch ? "#bfa85b" : meta.borderColor}`,
         background: rowBg,
         fontFamily: "monospace",
         gap: 6,
@@ -148,8 +169,30 @@ function FeedRow({ entry, index }: FeedRowProps) {
           flex: 1,
         }}
       >
-        {text}
+        {searchQuery ? highlightText(text, searchQuery) : text}
       </span>
+
+      {/* jump to map button */}
+      {onJump && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onJump(); }}
+          title="Jump to room on map"
+          style={{
+            background: "none",
+            border: "1px solid #3f4147",
+            borderRadius: 3,
+            color: "#5b8abf",
+            cursor: "pointer",
+            fontFamily: "monospace",
+            fontSize: 9,
+            padding: "0 4px",
+            lineHeight: 1.4,
+            flexShrink: 0,
+          }}
+        >
+          &gt;
+        </button>
+      )}
     </div>
   );
 }
@@ -253,14 +296,42 @@ function FilterTabs({ agents, selected, onSelect }: FilterTabsProps) {
 export function LiveFeed() {
   const transcript = useGameState((s) => s.transcript);
   const agents = useGameState((s) => s.agents);
+  const dag = useGameState((s) => s.dag);
   const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
+  const searchQuery = useGameState((s) => s.searchQuery);
+  const searchFilters = useGameState((s) => s.searchFilters);
+  const getFilteredTranscript = useGameState((s) => s.getFilteredTranscript);
+  const focusOnNode = useGameState((s) => s.focusOnNode);
 
   const feedRef = useRef<HTMLDivElement>(null);
   const [nearBottom, setNearBottom] = useState(true);
   const [hasNew, setHasNew] = useState(false);
 
-  // Filtered entries
+  const hasActiveSearch = searchQuery.trim() !== "" ||
+    searchFilters.agentIds.length > 0 ||
+    searchFilters.actionTypes.length > 0 ||
+    searchFilters.timeRange !== "all";
+
+  // Build match set for highlighting
+  const filteredSet = useMemo(() => {
+    if (!hasActiveSearch) return null;
+    const filtered = getFilteredTranscript();
+    return new Set(filtered.map((e) => `${e.ts}-${e.agentId}`));
+  }, [hasActiveSearch, getFilteredTranscript, transcript, searchQuery, searchFilters]);
+
+  const matchCount = filteredSet?.size ?? 0;
+
+  // Jump to room on map for a given agent
+  const jumpToAgent = useCallback(
+    (agentId: string) => {
+      const node = dag.nodes.find((n) => n.assignee === agentId);
+      if (node) focusOnNode(node.nodeId);
+    },
+    [dag, focusOnNode]
+  );
+
+  // Filtered entries (agent tab filter still applies on top)
   const entries = selectedAgent
     ? transcript.filter((e) => e.agentId === selectedAgent)
     : transcript;
@@ -305,6 +376,9 @@ export function LiveFeed() {
         position: "relative",
       }}
     >
+      {/* search bar */}
+      <SearchBar matchCount={matchCount} />
+
       {/* filter tabs */}
       <FilterTabs
         agents={agents}
@@ -336,13 +410,20 @@ export function LiveFeed() {
             No activity yet…
           </div>
         )}
-        {entries.map((entry, i) => (
-          <FeedRow
-            key={`${entry.ts}-${entry.agentId}-${i}`}
-            entry={entry}
-            index={i}
-          />
-        ))}
+        {entries.map((entry, i) => {
+          const entryKey = `${entry.ts}-${entry.agentId}`;
+          const isMatch = filteredSet ? filteredSet.has(entryKey) : false;
+          return (
+            <FeedRow
+              key={`${entryKey}-${i}`}
+              entry={entry}
+              index={i}
+              searchQuery={hasActiveSearch ? searchQuery : undefined}
+              isMatch={hasActiveSearch ? isMatch : undefined}
+              onJump={entry.agentId ? () => jumpToAgent(entry.agentId) : undefined}
+            />
+          );
+        })}
       </div>
 
       {/* "new activity" floating button */}

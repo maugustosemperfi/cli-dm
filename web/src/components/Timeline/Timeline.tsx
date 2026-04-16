@@ -1,5 +1,6 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
+import type { TimelineSegment } from "../../stores/gameState";
 
 const ACTION_COLORS: Record<string, string> = {
   read: "#5b8abf",
@@ -38,6 +39,9 @@ export function Timeline() {
   const agents = useGameState((s) => s.agents);
   const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
+  const searchQuery = useGameState((s) => s.searchQuery);
+  const searchFilters = useGameState((s) => s.searchFilters);
+  const getFilteredTimeline = useGameState((s) => s.getFilteredTimeline);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isScrolledRef = useRef(true);
@@ -58,6 +62,18 @@ export function Timeline() {
       el.scrollLeft = el.scrollWidth;
     }
   }, [timeline, pixelsPerSecond]);
+
+  // Build set of matched timeline segments for search highlighting
+  const hasActiveSearch = searchQuery.trim() !== "" ||
+    searchFilters.agentIds.length > 0 ||
+    searchFilters.actionTypes.length > 0 ||
+    searchFilters.timeRange !== "all";
+
+  const matchedSegments = useMemo(() => {
+    if (!hasActiveSearch) return null;
+    const filtered = getFilteredTimeline();
+    return new Set(filtered.map((s: TimelineSegment) => `${s.agentId}-${s.startTs}`));
+  }, [hasActiveSearch, getFilteredTimeline, timeline, searchQuery, searchFilters]);
 
   // Canvas rendering (wrapped in a draw function for animation loop)
   const draw = useCallback(() => {
@@ -175,6 +191,11 @@ export function Timeline() {
       const laneIdx = agentIds.indexOf(seg.agentId);
       if (laneIdx < 0) continue;
 
+      // Search-aware dimming
+      const segKey = `${seg.agentId}-${seg.startTs}`;
+      const isSearchMatch = matchedSegments ? matchedSegments.has(segKey) : true;
+      const dimFactor = matchedSegments && !isSearchMatch ? 0.25 : 1.0;
+
       const y = TIME_AXIS_HEIGHT + laneIdx * LANE_HEIGHT + 3;
       const h = LANE_HEIGHT - 6;
       const xStart =
@@ -188,7 +209,7 @@ export function Timeline() {
 
       // Block fill
       ctx.fillStyle = baseColor;
-      ctx.globalAlpha = seg.endTs ? 0.8 : 0.6;
+      ctx.globalAlpha = (seg.endTs ? 0.8 : 0.6) * dimFactor;
       ctx.beginPath();
       ctx.roundRect(xStart, y, w, h, 3);
       ctx.fill();
@@ -221,15 +242,19 @@ export function Timeline() {
       // Border: running segments get animated alpha border, completed get a 1px lighter border
       ctx.beginPath();
       ctx.roundRect(xStart, y, w, h, 3);
-      if (!seg.endTs) {
+      if (matchedSegments && isSearchMatch) {
+        // Bright border for search matches
+        ctx.strokeStyle = "#bfa85b";
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 1;
+      } else if (!seg.endTs) {
         ctx.strokeStyle = baseColor;
         ctx.lineWidth = 1.5;
-        ctx.globalAlpha = 0.5 + Math.sin(now * 0.005) * 0.3;
+        ctx.globalAlpha = (0.5 + Math.sin(now * 0.005) * 0.3) * dimFactor;
       } else {
-        // Lighter 1px border for completed segments
         ctx.strokeStyle = lightenColor(baseColor, 0.4);
         ctx.lineWidth = 1;
-        ctx.globalAlpha = 0.5;
+        ctx.globalAlpha = 0.5 * dimFactor;
       }
       ctx.stroke();
       ctx.globalAlpha = 1;
@@ -237,11 +262,13 @@ export function Timeline() {
       // Label inside block if wide enough
       if (w > 30) {
         ctx.fillStyle = "#dbdee1";
+        ctx.globalAlpha = dimFactor;
         ctx.font = "9px monospace";
         ctx.textBaseline = "middle";
         const label =
           seg.action + (seg.detail ? `: ${seg.detail.slice(0, 20)}` : "");
         ctx.fillText(label, xStart + 3, y + h / 2, w - 6);
+        ctx.globalAlpha = 1;
       }
     }
 
@@ -258,7 +285,7 @@ export function Timeline() {
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
-  }, [timeline, agents, agentIds, selectedAgent, pixelsPerSecond]);
+  }, [timeline, agents, agentIds, selectedAgent, pixelsPerSecond, matchedSegments]);
 
   // Animation loop: keeps running segments and barber-pole animated
   useEffect(() => {

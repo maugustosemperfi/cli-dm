@@ -411,6 +411,8 @@ export const useGameState = create<GameState>((set, get) => ({
           totalTests: 0,
         });
         set({ agents });
+        // Start ambient soundscape on first agent spawn
+        soundManager.startAmbient();
         pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
         pushTranscript({ agentId: event.agentId, agentName: event.name, agentRole: event.role, kind: "spawn", message: `joined the dungeon as ${event.role}` });
         break;
@@ -504,6 +506,21 @@ export const useGameState = create<GameState>((set, get) => ({
         const agent = agents.get(event.agentId);
         if (agent) {
           const prevAction = agent.currentAction;
+
+          // Ambient soundscape: play action sound + update activity level
+          soundManager.playActionSound(event.action);
+          {
+            let activeCount = 0;
+            for (const a of state.agents.values()) {
+              if (a.currentAction !== "idle" && !a.isComplete) activeCount++;
+            }
+            soundManager.setActivityLevel(Math.min(1, activeCount / 5));
+            let hasErrors = false;
+            for (const a of state.agents.values()) {
+              if ((a.errorCount ?? 0) > 0 && !a.isComplete) { hasErrors = true; break; }
+            }
+            soundManager.setErrorAtmosphere(hasErrors);
+          }
 
           // Discovery tracking — detect new directories on read/edit
           let { discoveredPaths, discoveredPathCount, lastDiscoveredPath } = agent;

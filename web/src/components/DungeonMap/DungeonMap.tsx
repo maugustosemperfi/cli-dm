@@ -62,6 +62,7 @@ export function DungeonMap() {
   const errorPropagations = useGameState((s) => s.errorPropagations);
   const activeLayer = useGameState((s) => s.activeLayer);
   const roomMetrics = useGameState((s) => s.roomMetrics);
+  const roomHistory = useGameState((s) => s.roomHistory);
   const burnRates = useGameState((s) => s.burnRates);
 
   // Initialize PixiJS — wait for container to have real dimensions
@@ -286,6 +287,15 @@ export function DungeonMap() {
           }
 
           camera.tick();
+
+          // Zoom-to-volume: feed camera zoom level to sound manager
+          const vp = camera.getViewport();
+          soundManager.setZoomVolume(vp.scale);
+
+          // Day/night: feed to sound manager
+          if (dayNightRef.current) {
+            soundManager.setDayNight(dayNightRef.current.isNight());
+          }
 
           const followPositions: Array<{ x: number; y: number }> = [];
           for (const sprite of spritesRef.current.values()) {
@@ -981,6 +991,7 @@ export function DungeonMap() {
         dag={dag}
         agents={agents}
         camera={cameraRef.current}
+        roomMetrics={roomMetrics}
         onClickWorld={handleMinimapClick}
       />
     </div>
