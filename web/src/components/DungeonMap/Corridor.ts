@@ -2,6 +2,7 @@ import { Graphics } from "pixi.js";
 import type { NodeStatus } from "../../protocol/events";
 import { THEME, ROOM_WIDTH, ROOM_HEIGHT, AGENT_HEX } from "./theme";
 import type { LayoutNode } from "./layout";
+import type { RoomMetrics, MapLayer } from "../../stores/gameState";
 
 /** Half-width of the corridor hallway in pixels */
 const CORRIDOR_HALF_W = 18;
@@ -25,13 +26,19 @@ export class Corridor extends Graphics {
   private flowIntensity = 0;
   private fireIntensity = 0;
   private accumulatedHeat = 0;
+  private burnPulse = 0;       // 0-1, normalized burn intensity for width pulse
+  private bottleneckRatio = 0; // fraction of total tokens at this corridor's endpoint
   /** Precomputed spine points for the corridor curve */
   private spine: Array<[number, number]> = [];
+  private overlayGfx: Graphics;
 
   constructor(from: LayoutNode, to: LayoutNode) {
     super();
     this.fromNode = from;
     this.toNode = to;
+    this.overlayGfx = new Graphics();
+    this.overlayGfx.alpha = 0;
+    this.addChild(this.overlayGfx);
     this.computeSpine();
     this.draw(THEME.corridorDefault, false);
   }
@@ -101,6 +108,73 @@ export class Corridor extends Graphics {
     }
     if (this.fireParticles.length > 40) {
       this.fireParticles.splice(0, this.fireParticles.length - 40);
+    }
+  }
+
+  /** Set overlay tinting for the active map layer */
+  setOverlay(layer: MapLayer, fromMetrics: RoomMetrics | null, toMetrics: RoomMetrics | null, maxTokens: number, maxErrors: number) {
+    this.overlayGfx.clear();
+
+    if (layer === "default" || (!fromMetrics && !toMetrics)) {
+      this.overlayGfx.alpha = 0;
+      return;
+    }
+
+    const fm = fromMetrics ?? { totalTokens: 0, totalCostUSD: 0, errorCount: 0, actionCount: 0, lastActionTs: 0, lastErrorTs: 0 };
+    const tm = toMetrics ?? { totalTokens: 0, totalCostUSD: 0, errorCount: 0, actionCount: 0, lastActionTs: 0, lastErrorTs: 0 };
+
+    if (this.spine.length < 2) {
+      this.overlayGfx.alpha = 0;
+      return;
+    }
+
+    switch (layer) {
+      case "cost": {
+        const avgTokens = (fm.totalTokens + tm.totalTokens) / 2;
+        const ratio = maxTokens > 0 ? Math.min(1, avgTokens / maxTokens) : 0;
+        if (ratio < 0.01) { this.overlayGfx.alpha = 0; return; }
+        const color = corridorLerpHeatColor(ratio);
+        this.overlayGfx.moveTo(this.spine[0][0], this.spine[0][1]);
+        for (let i = 1; i <= SPINE_STEPS; i++) {
+          this.overlayGfx.lineTo(this.spine[i][0], this.spine[i][1]);
+        }
+        this.overlayGfx.stroke({ color, width: CORRIDOR_HALF_W * 1.2, alpha: 0.25 });
+        this.overlayGfx.alpha = 1;
+        break;
+      }
+      case "errors": {
+        const hasErrors = fm.errorCount > 0 || tm.errorCount > 0;
+        if (!hasErrors) { this.overlayGfx.alpha = 0; return; }
+        this.overlayGfx.moveTo(this.spine[0][0], this.spine[0][1]);
+        for (let i = 1; i <= SPINE_STEPS; i++) {
+          this.overlayGfx.lineTo(this.spine[i][0], this.spine[i][1]);
+        }
+        const maxE = Math.max(fm.errorCount, tm.errorCount);
+        const ratio = maxErrors > 0 ? Math.min(1, maxE / maxErrors) : 0.5;
+        this.overlayGfx.stroke({ color: 0xff4444, width: CORRIDOR_HALF_W * 0.8, alpha: 0.15 + ratio * 0.2 });
+        this.overlayGfx.alpha = 1;
+        break;
+      }
+      case "activity": {
+        const now = Date.now();
+        const recentTs = Math.max(fm.lastActionTs, tm.lastActionTs);
+        if (recentTs === 0) { this.overlayGfx.alpha = 0; return; }
+        const age = now - recentTs;
+        const MAX_AGE = 120_000;
+        const recency = Math.max(0.1, 1 - age / MAX_AGE);
+        this.overlayGfx.moveTo(this.spine[0][0], this.spine[0][1]);
+        for (let i = 1; i <= SPINE_STEPS; i++) {
+          this.overlayGfx.lineTo(this.spine[i][0], this.spine[i][1]);
+        }
+        this.overlayGfx.stroke({ color: 0x5b8abf, width: CORRIDOR_HALF_W * 0.6, alpha: recency * 0.3 });
+        this.overlayGfx.alpha = 1;
+        break;
+      }
+      case "fog": {
+        // Fog overlay handled primarily by FogOfWar.ts
+        this.overlayGfx.alpha = 0;
+        break;
+      }
     }
   }
 
@@ -391,4 +465,15 @@ export class Corridor extends Graphics {
     this.moveTo(topX, topY).lineTo(botX, botY)
       .stroke({ color, width: 1.5, alpha: 0.2 });
   }
+}
+
+/** Green → Yellow → Red heatmap color based on 0-1 ratio */
+function corridorLerpHeatColor(ratio: number): number {
+  const lerp = (a: number, b: number, t: number) => {
+    const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+    const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+    return (Math.round(ar + (br - ar) * t) << 16) | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+  };
+  if (ratio < 0.5) return lerp(0x00ff00, 0xffff00, ratio * 2);
+  return lerp(0xffff00, 0xff0000, (ratio - 0.5) * 2);
 }

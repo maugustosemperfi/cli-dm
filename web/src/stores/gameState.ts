@@ -117,6 +117,39 @@ export interface ErrorPropagation {
   affectedNodes: string[];
 }
 
+// Per-room aggregate metrics for map overlay layers
+export interface RoomMetrics {
+  totalTokens: number;
+  totalCostUSD: number;
+  errorCount: number;
+  actionCount: number;
+  lastActionTs: number;
+  lastErrorTs: number;
+}
+
+// Token burn rate tracking per room (rolling window for rate calculation)
+export interface BurnRate {
+  totalTokens: number;
+  totalCostUSD: number;
+  tokenHistory: Array<{ ts: number; tokens: number }>;
+  ratePerMin: number;
+}
+
+export type MapLayer = "default" | "cost" | "errors" | "activity" | "fog";
+
+export interface SearchFilters {
+  agentIds: string[];      // empty = all
+  actionTypes: string[];   // empty = all
+  timeRange: "5m" | "15m" | "1h" | "all";
+}
+
+const TIME_RANGE_MS: Record<SearchFilters["timeRange"], number> = {
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "1h": 60 * 60_000,
+  all: Infinity,
+};
+
 const MAX_LOG_ENTRIES = 500;
 
 // Browser notification helper
@@ -139,11 +172,25 @@ interface GameState {
   transcript: TranscriptEntry[];
   timeline: TimelineSegment[];
   errorPropagations: ErrorPropagation[];
+  roomMetrics: Map<string, RoomMetrics>;
+  burnRates: Map<string, BurnRate>;
+  activeLayer: MapLayer;
+
+  // Search & filter
+  searchQuery: string;
+  searchFilters: SearchFilters;
+  focusNodeId: string | null;  // set to pan camera to a room
 
   // Actions
   handleEvent: (event: GameEvent) => void;
   selectAgent: (agentId: string | null) => void;
   setConnected: (connected: boolean) => void;
+  setActiveLayer: (layer: MapLayer) => void;
+  setSearchQuery: (query: string) => void;
+  setSearchFilters: (filters: Partial<SearchFilters>) => void;
+  focusOnNode: (nodeId: string | null) => void;
+  getFilteredTranscript: () => TranscriptEntry[];
+  getFilteredTimeline: () => TimelineSegment[];
 }
 
 const MAX_TOOL_FLOWS = 200;
@@ -194,10 +241,61 @@ export const useGameState = create<GameState>((set, get) => ({
   transcript: [],
   timeline: [],
   errorPropagations: [],
+  roomMetrics: new Map(),
+  burnRates: new Map(),
+  activeLayer: "default",
+
+  // Search & filter
+  searchQuery: "",
+  searchFilters: { agentIds: [], actionTypes: [], timeRange: "all" },
+  focusNodeId: null,
 
   setConnected: (connected) => set({ connected }),
 
   selectAgent: (agentId) => set({ selectedAgent: agentId }),
+
+  setActiveLayer: (layer) => set({ activeLayer: layer }),
+
+  setSearchQuery: (query) => set({ searchQuery: query }),
+
+  setSearchFilters: (filters) =>
+    set((s) => ({ searchFilters: { ...s.searchFilters, ...filters } })),
+
+  focusOnNode: (nodeId) => set({ focusNodeId: nodeId }),
+
+  getFilteredTranscript: () => {
+    const { transcript, searchQuery, searchFilters } = get();
+    const q = searchQuery.toLowerCase().trim();
+    const now = Date.now();
+    const cutoff = TIME_RANGE_MS[searchFilters.timeRange];
+    return transcript.filter((e) => {
+      if (searchFilters.agentIds.length > 0 && !searchFilters.agentIds.includes(e.agentId)) return false;
+      if (searchFilters.actionTypes.length > 0 && e.action && !searchFilters.actionTypes.includes(e.action)) return false;
+      if (cutoff !== Infinity && now - e.ts > cutoff) return false;
+      if (q) {
+        const text = `${e.action ?? ""} ${e.detail ?? ""} ${e.message ?? ""} ${e.agentName ?? ""}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    });
+  },
+
+  getFilteredTimeline: () => {
+    const { timeline, searchQuery, searchFilters } = get();
+    const q = searchQuery.toLowerCase().trim();
+    const now = Date.now();
+    const cutoff = TIME_RANGE_MS[searchFilters.timeRange];
+    return timeline.filter((s) => {
+      if (searchFilters.agentIds.length > 0 && !searchFilters.agentIds.includes(s.agentId)) return false;
+      if (searchFilters.actionTypes.length > 0 && !searchFilters.actionTypes.includes(s.action)) return false;
+      if (cutoff !== Infinity && now - s.startTs > cutoff) return false;
+      if (q) {
+        const text = `${s.action} ${s.detail ?? ""} ${s.agentName}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    });
+  },
 
   handleEvent: (event) => {
     // Debug: log non-noisy events
@@ -223,6 +321,20 @@ export const useGameState = create<GameState>((set, get) => ({
       return state.dag.nodes.find((n) => n.assignee === agentId)?.nodeId;
     };
 
+    // Update per-room metrics for overlay layers
+    const updateRoomMetrics = (agentId: string, updater: (m: RoomMetrics) => void) => {
+      const nodeId = agentNodeId(agentId);
+      if (!nodeId) return;
+      const metrics = new Map(get().roomMetrics);
+      const existing = metrics.get(nodeId) ?? {
+        totalTokens: 0, totalCostUSD: 0, errorCount: 0,
+        actionCount: 0, lastActionTs: 0, lastErrorTs: 0,
+      };
+      const updated = { ...existing };
+      updater(updated);
+      metrics.set(nodeId, updated);
+      set({ roomMetrics: metrics });
+    };
 
     switch (event.type) {
       case "state.snapshot": {
@@ -325,6 +437,12 @@ export const useGameState = create<GameState>((set, get) => ({
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "error", message: event.message ?? "hit an error" });
           notifyBrowser(`${agent.name} hit an error!`, "error-" + event.agentId);
 
+          // Room metrics: track error
+          updateRoomMetrics(event.agentId, (m) => {
+            m.errorCount++;
+            m.lastErrorTs = event.ts ?? Date.now();
+          });
+
           // Error propagation — find connected nodes and spread fire
           const srcNode = agentNodeId(event.agentId);
           if (srcNode) {
@@ -394,6 +512,12 @@ export const useGameState = create<GameState>((set, get) => ({
             visitedRooms,
           });
           set({ agents });
+
+          // Room metrics: track action count and recency
+          updateRoomMetrics(event.agentId, (m) => {
+            m.actionCount++;
+            m.lastActionTs = event.ts ?? Date.now();
+          });
 
           // Tool flow: track transition from previous action's node
           const currNodeId = agentNodeId(event.agentId);
@@ -481,13 +605,48 @@ export const useGameState = create<GameState>((set, get) => ({
         const agents = new Map(state.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
+          const tokensAdded = event.tokens ?? 0;
+          const costAdded = event.costUsd ?? 0;
           agents.set(event.agentId, {
             ...agent,
-            tokens: agent.tokens + (event.tokens ?? 0),
-            gold: agent.gold + (event.costUsd ?? 0) * 100, // cents
+            tokens: agent.tokens + tokensAdded,
+            gold: agent.gold + costAdded * 100, // cents
           });
           set({ agents });
           savePersistedStats(agents);
+
+          // Room metrics: track tokens and cost
+          updateRoomMetrics(event.agentId, (m) => {
+            m.totalTokens += tokensAdded;
+            m.totalCostUSD += costAdded;
+          });
+
+          // Burn rate tracking per node
+          if (tokensAdded > 0) {
+            const nodeId = agentNodeId(event.agentId);
+            if (nodeId) {
+              const burnRates = new Map(state.burnRates);
+              const existing = burnRates.get(nodeId) ?? {
+                totalTokens: 0, totalCostUSD: 0, tokenHistory: [], ratePerMin: 0,
+              };
+              const now = event.ts ?? Date.now();
+              const estimatedCost = costAdded > 0
+                ? costAdded
+                : tokensAdded * 9 / 1_000_000; // rough average estimate
+              const history = [
+                ...existing.tokenHistory,
+                { ts: now, tokens: tokensAdded },
+              ].filter((h) => now - h.ts < 60_000); // keep last 60s
+              const ratePerMin = history.reduce((s, h) => s + h.tokens, 0);
+              burnRates.set(nodeId, {
+                totalTokens: existing.totalTokens + tokensAdded,
+                totalCostUSD: existing.totalCostUSD + estimatedCost,
+                tokenHistory: history,
+                ratePerMin,
+              });
+              set({ burnRates });
+            }
+          }
         }
         break;
       }

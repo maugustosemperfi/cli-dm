@@ -24,6 +24,7 @@ import { THEME } from "./theme";
 import { Minimap } from "../Minimap/Minimap";
 import { soundManager } from "../../audio/SoundManager";
 import { SpawnLink } from "./SpawnLink";
+import { LayerControls } from "./LayerControls";
 
 export function DungeonMap() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -59,6 +60,8 @@ export function DungeonMap() {
   const selectAgent = useGameState((s) => s.selectAgent);
   const toolFlows = useGameState((s) => s.toolFlows);
   const errorPropagations = useGameState((s) => s.errorPropagations);
+  const activeLayer = useGameState((s) => s.activeLayer);
+  const roomMetrics = useGameState((s) => s.roomMetrics);
 
   // Initialize PixiJS — wait for container to have real dimensions
   useEffect(() => {
@@ -352,6 +355,11 @@ export function DungeonMap() {
         room.position.set(ln.x - 90, ln.y - 35);
         const aa = agents.get(dn.assignee ?? "");
         room.update(dn.status, aa?.name, aa?.role, aa?.currentAction);
+        // Building tier from agent level
+        if (aa) {
+          const tier = aa.level >= 8 ? 4 : aa.level >= 5 ? 3 : aa.level >= 3 ? 2 : 1;
+          room.setTier(tier);
+        }
         // File attention heatmap — rooms glow by agent activity
         room.setHeat(aa?.activityHeat ?? 0);
 
@@ -470,6 +478,31 @@ export function DungeonMap() {
             const sc = corridorMap.get(sKey);
             if (sc) sc.ignite(prop.intensity * 0.7);
           }
+        }
+      }
+
+      // Apply map layer overlays to rooms and corridors
+      {
+        // Compute max values for normalization
+        let maxTokens = 0;
+        let maxErrors = 0;
+        for (const m of roomMetrics.values()) {
+          if (m.totalTokens > maxTokens) maxTokens = m.totalTokens;
+          if (m.errorCount > maxErrors) maxErrors = m.errorCount;
+        }
+        // Ensure at least 1 to avoid division by zero
+        if (maxTokens === 0) maxTokens = 1;
+        if (maxErrors === 0) maxErrors = 1;
+
+        for (const [nodeId, room] of rooms) {
+          const metrics = roomMetrics.get(nodeId) ?? null;
+          room.setOverlay(activeLayer, metrics, maxTokens, maxErrors);
+        }
+
+        for (const corridor of corridorsRef.current) {
+          const fromMetrics = roomMetrics.get(corridor.fromNode.nodeId) ?? null;
+          const toMetrics = roomMetrics.get(corridor.toNode.nodeId) ?? null;
+          corridor.setOverlay(activeLayer, fromMetrics, toMetrics, maxTokens, maxErrors);
         }
       }
 
@@ -842,7 +875,7 @@ export function DungeonMap() {
         }
       }
     },
-    [selectAgent, toolFlows, errorPropagations]
+    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics]
   );
 
   useEffect(() => {
@@ -884,6 +917,7 @@ export function DungeonMap() {
   return (
     <div style={{ width: "100%", height: "100%", overflow: "hidden", position: "relative" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+      <LayerControls />
       <Minimap
         dag={dag}
         agents={agents}
