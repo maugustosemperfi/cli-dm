@@ -42,6 +42,71 @@ export function xpForNextLevel(level: number): number {
   return level * level * 100;
 }
 
+// --- Agent Class System ---
+export type AgentClass = 'scholar' | 'berserker' | 'artificer' | 'paladin' | 'necromancer' | 'architect';
+
+export interface ActionProfile {
+  recentActions: string[];  // rolling window of last 50 action types
+  classType: AgentClass;
+  classChangedAt: number;   // timestamp of last class change
+}
+
+export const CLASS_COLORS: Record<AgentClass, number> = {
+  scholar: 0x8b6baf,
+  berserker: 0xbf4040,
+  artificer: 0xd4800a,
+  paladin: 0xdaa520,
+  necromancer: 0x4a1a6b,
+  architect: 0x4070bf,
+};
+
+function calculateAgentClass(actions: string[]): AgentClass {
+  if (actions.length === 0) return 'paladin';
+  const total = actions.length;
+  const counts: Record<string, number> = {};
+  for (const a of actions) counts[a] = (counts[a] ?? 0) + 1;
+  const ratio = (key: string) => (counts[key] ?? 0) / total;
+
+  if (ratio('error') > 0.3) return 'necromancer';
+  if (ratio('read') > 0.5) return 'scholar';
+  if (ratio('shell') > 0.5) return 'berserker';
+  if (ratio('edit') > 0.5) return 'artificer';
+  if (ratio('build') + ratio('test') > 0.4) return 'architect';
+  return 'paladin';
+}
+
+// --- Boss Battle System ---
+export type BossDataType = 'test_hydra' | 'forge_golem' | 'siege_dragon' | 'gate_keeper';
+
+export interface BossState {
+  bossId: string;
+  bossType: BossDataType;
+  name: string;
+  maxHP: number;
+  currentHP: number;
+  nodeId: string;
+  agentId: string;
+  isAlive: boolean;
+  participants: string[];
+  lootDropped: boolean;
+  reason?: string;
+  lastDamageTs: number;
+}
+
+const BOSS_DISPLAY_NAMES: Record<BossDataType, string> = {
+  test_hydra: 'Test Hydra',
+  forge_golem: 'Forge Golem',
+  siege_dragon: 'Siege Dragon',
+  gate_keeper: 'Gate Keeper',
+};
+
+const BOSS_MAX_HP: Record<BossDataType, number> = {
+  test_hydra: 100,
+  forge_golem: 80,
+  siege_dragon: 150,
+  gate_keeper: 50,
+};
+
 export interface AgentState extends AgentSnapshot {
   // Accumulated raw output (last N bytes for display)
   outputBuffer: string[];
@@ -65,6 +130,8 @@ export interface AgentState extends AgentSnapshot {
   totalEdits: number;
   totalBuilds: number;
   totalTests: number;
+  // Agent class from behavior
+  actionProfile: ActionProfile;
 }
 
 export interface EventLogEntry {
@@ -193,6 +260,7 @@ interface GameState {
   burnRates: Map<string, BurnRate>;
   roomHistory: Map<string, RoomHistory>;
   activeLayer: MapLayer;
+  bosses: Map<string, BossState>;
 
   // Search & filter
   searchQuery: string;
@@ -201,6 +269,8 @@ interface GameState {
 
   // Actions
   handleEvent: (event: GameEvent) => void;
+  spawnBoss: (type: BossDataType, agentId: string, nodeId: string, reason?: string) => void;
+  damageBoss: (bossId: string, damage: number, agentId: string) => void;
   selectAgent: (agentId: string | null) => void;
   setConnected: (connected: boolean) => void;
   setActiveLayer: (layer: MapLayer) => void;
@@ -263,11 +333,76 @@ export const useGameState = create<GameState>((set, get) => ({
   burnRates: new Map(),
   roomHistory: new Map(),
   activeLayer: "default",
+  bosses: new Map(),
 
   // Search & filter
   searchQuery: "",
   searchFilters: { agentIds: [], actionTypes: [], timeRange: "all" },
   focusNodeId: null,
+
+  spawnBoss: (type, agentId, nodeId, reason) => {
+    const state = get();
+    // Don't spawn if a boss of this type already exists for this node
+    for (const boss of state.bosses.values()) {
+      if (boss.nodeId === nodeId && boss.bossType === type && boss.isAlive) return;
+    }
+    const bossId = `boss_${type}_${nodeId}_${Date.now()}`;
+    const maxHP = BOSS_MAX_HP[type];
+    const newBoss: BossState = {
+      bossId,
+      bossType: type,
+      name: BOSS_DISPLAY_NAMES[type],
+      maxHP,
+      currentHP: maxHP,
+      nodeId,
+      agentId,
+      isAlive: true,
+      participants: [agentId],
+      lootDropped: false,
+      reason,
+      lastDamageTs: 0,
+    };
+    const bosses = new Map(state.bosses);
+    bosses.set(bossId, newBoss);
+    set({ bosses });
+    soundManager.playBlocked();
+  },
+
+  damageBoss: (bossId, damage, agentId) => {
+    const state = get();
+    const boss = state.bosses.get(bossId);
+    if (!boss || !boss.isAlive) return;
+    const newHP = Math.max(0, boss.currentHP - damage);
+    const isAlive = newHP > 0;
+    const participants = boss.participants.includes(agentId)
+      ? boss.participants
+      : [...boss.participants, agentId];
+    const bosses = new Map(state.bosses);
+    bosses.set(bossId, {
+      ...boss,
+      currentHP: newHP,
+      isAlive,
+      participants,
+      lootDropped: !isAlive,
+      lastDamageTs: Date.now(),
+    });
+    set({ bosses });
+    if (!isAlive) {
+      // Boss killed — award XP bonus to participants
+      const agents = new Map(state.agents);
+      for (const pid of participants) {
+        const agent = agents.get(pid);
+        if (agent) {
+          const bonusXP = Math.round(boss.maxHP * 1.5);
+          const newXP = agent.xp + bonusXP;
+          agents.set(pid, { ...agent, xp: newXP, level: levelFromXP(newXP) });
+        }
+      }
+      set({ agents });
+      savePersistedStats(agents);
+      soundManager.playComplete();
+    }
+  },
 
   setConnected: (connected) => set({ connected }),
 
@@ -378,6 +513,7 @@ export const useGameState = create<GameState>((set, get) => ({
             totalEdits: existing?.totalEdits ?? 0,
             totalBuilds: existing?.totalBuilds ?? 0,
             totalTests: existing?.totalTests ?? 0,
+            actionProfile: existing?.actionProfile ?? { recentActions: [], classType: 'paladin', classChangedAt: 0 },
           });
         }
         set({ agents, dag: event.dag });
@@ -409,6 +545,7 @@ export const useGameState = create<GameState>((set, get) => ({
           totalEdits: 0,
           totalBuilds: 0,
           totalTests: 0,
+          actionProfile: { recentActions: [], classType: 'paladin', classChangedAt: 0 },
         });
         set({ agents });
         // Start ambient soundscape on first agent spawn
@@ -607,6 +744,16 @@ export const useGameState = create<GameState>((set, get) => ({
           const detail = event.detail ? `: ${event.detail}` : "";
           pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `started ${event.action}${detail}` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_start", action: event.action, detail: event.detail });
+
+          // Boss spawning based on action type
+          const bossSpawnNode = agentNodeId(event.agentId);
+          if (bossSpawnNode) {
+            if (event.action === "test") {
+              get().spawnBoss('test_hydra', event.agentId, bossSpawnNode);
+            } else if (event.action === "build") {
+              get().spawnBoss('forge_golem', event.agentId, bossSpawnNode);
+            }
+          }
         }
         break;
       }
@@ -623,6 +770,21 @@ export const useGameState = create<GameState>((set, get) => ({
           const totalEdits = agent.totalEdits + (agent.currentAction === "edit" ? 1 : 0);
           const totalBuilds = agent.totalBuilds + (agent.currentAction === "build" ? 1 : 0);
           const totalTests = agent.totalTests + (agent.currentAction === "test" ? 1 : 0);
+          // Update action profile for class system
+          const completedAction = agent.currentAction;
+          const recentActions = [...agent.actionProfile.recentActions, completedAction];
+          if (recentActions.length > 50) recentActions.splice(0, recentActions.length - 50);
+          let actionProfile = agent.actionProfile;
+          if (recentActions.length % 10 === 0 || recentActions.length <= 3) {
+            const newClass = calculateAgentClass(recentActions);
+            actionProfile = {
+              recentActions,
+              classType: newClass,
+              classChangedAt: newClass !== agent.actionProfile.classType ? Date.now() : agent.actionProfile.classChangedAt,
+            };
+          } else {
+            actionProfile = { ...agent.actionProfile, recentActions };
+          }
           agents.set(event.agentId, {
             ...agent,
             currentAction: "idle" as ActionType,
@@ -633,9 +795,31 @@ export const useGameState = create<GameState>((set, get) => ({
             totalEdits,
             totalBuilds,
             totalTests,
+            actionProfile,
           });
           set({ agents });
           savePersistedStats(agents);
+
+          // Boss damage — find active boss in this agent's room
+          const bossNodeId = agentNodeId(event.agentId);
+          if (bossNodeId) {
+            for (const boss of get().bosses.values()) {
+              if (!boss.isAlive) continue;
+              if (boss.nodeId === bossNodeId || boss.bossType === 'siege_dragon') {
+                let damage = 0;
+                if (boss.bossType === 'test_hydra' && completedAction === 'test') {
+                  damage = 20 + Math.floor(Math.random() * 15);
+                } else if (boss.bossType === 'forge_golem' && completedAction === 'build') {
+                  damage = 25 + Math.floor(Math.random() * 15);
+                } else if (boss.bossType === 'siege_dragon') {
+                  damage = 10 + Math.floor(Math.random() * 10);
+                }
+                if (damage > 0) {
+                  get().damageBoss(boss.bossId, damage, event.agentId);
+                }
+              }
+            }
+          }
 
           // Room history: track completed action type
           const endNodeId = agentNodeId(event.agentId);
@@ -746,6 +930,12 @@ export const useGameState = create<GameState>((set, get) => ({
           pushLog({ category: "blocked", agentName: agent.name, agentRole: agent.role, message: `blocked: ${event.detail ?? "unknown reason"}` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "blocked", detail: event.detail ?? "unknown reason" });
           notifyBrowser(`${agent.name} is blocked!`, "blocked-" + event.agentId);
+
+          // Spawn gate_keeper boss for blocker
+          const blockerNode = agentNodeId(event.agentId);
+          if (blockerNode) {
+            get().spawnBoss('gate_keeper', event.agentId, blockerNode, event.detail);
+          }
         }
         break;
       }
@@ -761,6 +951,16 @@ export const useGameState = create<GameState>((set, get) => ({
           });
           set({ agents });
           pushLog({ category: "resolve", agentName: agent.name, agentRole: agent.role, message: "blocker resolved" });
+
+          // Kill gate_keeper boss when blocker resolves
+          const resolveNode = agentNodeId(event.agentId);
+          if (resolveNode) {
+            for (const boss of get().bosses.values()) {
+              if (boss.bossType === 'gate_keeper' && boss.nodeId === resolveNode && boss.isAlive) {
+                get().damageBoss(boss.bossId, boss.currentHP, event.agentId);
+              }
+            }
+          }
         }
         break;
       }

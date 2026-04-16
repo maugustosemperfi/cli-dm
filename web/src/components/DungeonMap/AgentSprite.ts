@@ -2,6 +2,7 @@ import { Container, FederatedPointerEvent, Graphics, Sprite, Text, TextStyle } f
 import type { ActionType, AgentRole } from "../../protocol/events";
 import { AGENT_HEX, THEME } from "./theme";
 import { CharacterRenderer, CHAR_WIDTH, CHAR_HEIGHT, type AnimState } from "./sprites/CharacterRenderer";
+import { CLASS_COLORS, type AgentClass } from "../../stores/gameState";
 import { SpeechBubble } from "./SpeechBubble";
 
 // Movement pattern: returns (offsetX, offsetY) from base position
@@ -148,6 +149,19 @@ export class AgentSprite extends Container {
   private lastEventTime = 0; // timestamp of last event from the backend
   private static readonly EVENT_FRESHNESS_MS = 10_000; // 10s — wander while fresh
 
+  // Agent class from behavior
+  private agentClass: AgentClass = 'paladin';
+  private classBadge: Graphics;
+  private classTransitionTimer = 0;
+
+  // Combat animation state
+  private combatState: 'idle' | 'attacking' | 'recoiling' | 'critical' = 'idle';
+  private combatTimer = 0;
+  private combatTargetX = 0;
+  private combatTargetY = 0;
+  private combatBaseX = 0;
+  private combatBaseY = 0;
+
   // Trail positions
   private trailHistory: Array<[number, number]> = [];
 
@@ -248,6 +262,12 @@ export class AgentSprite extends Container {
     this.costBadge.alpha = 0;
     this.addChild(this.costBadge);
 
+    // Class badge (small colored diamond near name)
+    this.classBadge = new Graphics();
+    this.classBadge.position.set(-20, CHAR_HEIGHT / 2 + 4);
+    this.classBadge.alpha = 0;
+    this.addChild(this.classBadge);
+
     // Speech bubble (above character)
     this.speechBubble = new SpeechBubble();
     const bubbleY = -CHAR_HEIGHT / 2 - 8;
@@ -344,6 +364,63 @@ export class AgentSprite extends Container {
   /** Update last event timestamp — agents only wander when events are fresh */
   setLastEventTime(ts: number) {
     this.lastEventTime = ts;
+  }
+
+  /** Update agent class and trigger transition animation if changed */
+  setAgentClass(newClass: AgentClass) {
+    if (newClass !== this.agentClass) {
+      this.agentClass = newClass;
+      this.classTransitionTimer = 45; // ~0.75s at 60fps
+      this.characterSprite.tint = CLASS_COLORS[newClass];
+    }
+    this.updateClassBadge();
+  }
+
+  getAgentClass(): AgentClass {
+    return this.agentClass;
+  }
+
+  private updateClassBadge(): void {
+    this.classBadge.clear();
+    const color = CLASS_COLORS[this.agentClass];
+    // Small diamond shape
+    this.classBadge
+      .moveTo(0, -4).lineTo(4, 0).lineTo(0, 4).lineTo(-4, 0).closePath()
+      .fill({ color, alpha: 0.9 })
+      .stroke({ color: 0xffffff, width: 0.5, alpha: 0.5 });
+    this.classBadge.alpha = 1;
+  }
+
+  /** Trigger attack animation toward a boss position */
+  attackBoss(targetX: number, targetY: number): void {
+    if (this.combatState !== 'idle') return;
+    this.combatState = 'attacking';
+    this.combatTimer = 20;
+    this.combatBaseX = this.baseX;
+    this.combatBaseY = this.baseY;
+    this.combatTargetX = targetX;
+    this.combatTargetY = targetY;
+  }
+
+  /** Trigger recoil animation (boss attacks the agent) */
+  takeDamage(): void {
+    if (this.combatState !== 'idle') return;
+    this.combatState = 'recoiling';
+    this.combatTimer = 15;
+    this.combatBaseX = this.baseX;
+    this.combatBaseY = this.baseY;
+    this.characterSprite.tint = 0xff4444;
+  }
+
+  /** Trigger critical hit animation */
+  criticalHit(targetX: number, targetY: number): void {
+    if (this.combatState !== 'idle') return;
+    this.combatState = 'critical';
+    this.combatTimer = 30;
+    this.combatBaseX = this.baseX;
+    this.combatBaseY = this.baseY;
+    this.combatTargetX = targetX;
+    this.combatTargetY = targetY;
   }
 
   /** Display accumulated cost (in cents) as a gold badge */
@@ -561,10 +638,50 @@ export class AgentSprite extends Container {
     const moveFn = MOVEMENTS[action] ?? MOVEMENTS.idle;
     const [rawOx, rawOy] = moveFn(this.time);
     const moveScale = this.isFresh() ? 1.0 : 0.3; // stale agents barely bob
-    const ox = rawOx * moveScale;
-    const oy = rawOy * moveScale;
-    const finalX = this.baseX + ox;
-    const finalY = this.baseY + oy;
+    // Class-based movement modifier
+    const CLASS_SPEED: Record<AgentClass, number> = {
+      scholar: 0.7, berserker: 1.4, artificer: 0.9,
+      paladin: 1.0, necromancer: 0.8, architect: 1.1,
+    };
+    const classMod = CLASS_SPEED[this.agentClass] ?? 1.0;
+    let ox = rawOx * moveScale * classMod;
+    let oy = rawOy * moveScale * classMod;
+    if (this.agentClass === 'berserker') {
+      ox += (Math.random() - 0.5) * 3;
+      oy += (Math.random() - 0.5) * 2;
+    }
+    if (this.agentClass === 'necromancer') {
+      ox += Math.sin(this.time * 0.007) * 2;
+    }
+
+    // Combat animation offset
+    let combatOx = 0, combatOy = 0;
+    if (this.combatState !== 'idle' && this.combatTimer > 0) {
+      this.combatTimer -= dt;
+      if (this.combatState === 'attacking' || this.combatState === 'critical') {
+        const maxDur = this.combatState === 'critical' ? 30 : 20;
+        const progress = 1 - this.combatTimer / maxDur;
+        const lungeProgress = progress < 0.4 ? progress / 0.4 : 1 - (progress - 0.4) / 0.6;
+        const dx = this.combatTargetX - this.combatBaseX;
+        const dy = this.combatTargetY - this.combatBaseY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const lungeLen = Math.min(dist * 0.4, 30);
+        if (dist > 0) {
+          combatOx = (dx / dist) * lungeLen * lungeProgress;
+          combatOy = (dy / dist) * lungeLen * lungeProgress;
+        }
+      } else if (this.combatState === 'recoiling') {
+        const progress = 1 - this.combatTimer / 15;
+        combatOx = -Math.sin(progress * Math.PI) * 8;
+      }
+      if (this.combatTimer <= 0) {
+        this.combatState = 'idle';
+        this.characterSprite.tint = 0xffffff;
+      }
+    }
+
+    const finalX = this.baseX + ox + combatOx;
+    const finalY = this.baseY + oy + combatOy;
 
     // Detect facing direction from horizontal movement
     const dx = finalX - this.prevX;
@@ -659,6 +776,30 @@ export class AgentSprite extends Container {
         this.levelUpRing.clear();
         this.levelUpRing.alpha = 0;
         this.compactParticles = [];
+      }
+    }
+
+    // Class transition animation
+    if (this.classTransitionTimer > 0) {
+      this.classTransitionTimer -= dt;
+      const progress = 1 - this.classTransitionTimer / 45;
+      const classColor = CLASS_COLORS[this.agentClass];
+      if (progress < 0.3) {
+        this.characterSprite.tint = 0xffffff;
+      } else if (progress < 0.6) {
+        this.characterSprite.tint = classColor;
+      } else {
+        this.characterSprite.tint = 0xffffff;
+      }
+      // Expanding ring burst
+      if (this.classTransitionTimer > 30 && this.compactTimer <= 0 && this.levelUpTimer <= 0) {
+        const burstProgress = (45 - this.classTransitionTimer) / 15;
+        const burstR = 20 + burstProgress * 30;
+        this.levelUpRing.clear();
+        this.levelUpRing
+          .circle(0, 0, burstR)
+          .stroke({ color: classColor, width: 2, alpha: 1 - burstProgress });
+        this.levelUpRing.alpha = 1;
       }
     }
 

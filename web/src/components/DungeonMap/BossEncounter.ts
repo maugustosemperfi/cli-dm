@@ -1,6 +1,21 @@
 import { Container, Graphics, Text, TextStyle } from "pixi.js";
 
-export type BossType = "dragon" | "skeleton" | "golem";
+export type BossType = "dragon" | "skeleton" | "golem" | "hydra";
+export type BossDataType = 'test_hydra' | 'forge_golem' | 'siege_dragon' | 'gate_keeper';
+
+export const BOSS_DATA_TO_VISUAL: Record<BossDataType, BossType> = {
+  test_hydra: 'hydra',
+  forge_golem: 'golem',
+  siege_dragon: 'dragon',
+  gate_keeper: 'dragon',
+};
+
+export const BOSS_DATA_NAMES: Record<BossDataType, string> = {
+  test_hydra: 'Test Hydra',
+  forge_golem: 'Forge Golem',
+  siege_dragon: 'Siege Dragon',
+  gate_keeper: 'Gate Keeper',
+};
 
 const P = 2; // pixel scale
 
@@ -100,22 +115,61 @@ const GOLEM_PIXELS: Array<[number, number, number]> = [
   [19, 7, 0x6d6f78], [18, 8, 0x6d6f78], [18, 9, 0x5c5e67], [18, 10, 0x5c5e67], [17, 10, 0x6d6f78],
 ];
 
+// --- Hydra (24x24) — multi-headed serpent, green/teal ---
+const HYDRA_PIXELS: Array<[number, number, number]> = [
+  // Left head
+  [4, 2, 0x3a8a5a], [5, 2, 0x3a8a5a], [6, 2, 0x3a8a5a],
+  [4, 3, 0x2a7a4a], [5, 3, 0xff3333], [6, 3, 0x2a7a4a],
+  [5, 4, 0x3a8a5a], [6, 4, 0x3a8a5a],
+  [7, 5, 0x3a8a5a], [7, 6, 0x2a7a4a], [8, 7, 0x3a8a5a],
+  // Center head
+  [10, 0, 0x3a8a5a], [11, 0, 0x3a8a5a], [12, 0, 0x3a8a5a], [13, 0, 0x3a8a5a],
+  [10, 1, 0x2a7a4a], [11, 1, 0xff3333], [12, 1, 0xff3333], [13, 1, 0x2a7a4a],
+  [10, 2, 0x3a8a5a], [11, 2, 0x2a7a4a], [12, 2, 0x2a7a4a], [13, 2, 0x3a8a5a],
+  [11, 3, 0x3a8a5a], [12, 3, 0x3a8a5a],
+  [11, 4, 0x2a7a4a], [12, 4, 0x2a7a4a],
+  [11, 5, 0x3a8a5a], [12, 5, 0x3a8a5a],
+  // Right head
+  [17, 2, 0x3a8a5a], [18, 2, 0x3a8a5a], [19, 2, 0x3a8a5a],
+  [17, 3, 0x2a7a4a], [18, 3, 0xff3333], [19, 3, 0x2a7a4a],
+  [17, 4, 0x3a8a5a], [18, 4, 0x3a8a5a],
+  [16, 5, 0x3a8a5a], [16, 6, 0x2a7a4a], [15, 7, 0x3a8a5a],
+  // Body
+  [8, 8, 0x3a8a5a], [9, 8, 0x3a8a5a], [10, 8, 0x2a7a4a], [11, 8, 0x2a7a4a],
+  [12, 8, 0x2a7a4a], [13, 8, 0x2a7a4a], [14, 8, 0x3a8a5a], [15, 8, 0x3a8a5a],
+  [7, 9, 0x3a8a5a], [8, 9, 0x2a7a4a], [9, 9, 0x4a9a6a], [10, 9, 0x4a9a6a],
+  [11, 9, 0x2a7a4a], [12, 9, 0x2a7a4a], [13, 9, 0x4a9a6a], [14, 9, 0x4a9a6a],
+  [15, 9, 0x2a7a4a], [16, 9, 0x3a8a5a],
+  [8, 10, 0x3a8a5a], [9, 10, 0x2a7a4a], [10, 10, 0x4a9a6a], [11, 10, 0x4a9a6a],
+  [12, 10, 0x4a9a6a], [13, 10, 0x4a9a6a], [14, 10, 0x2a7a4a], [15, 10, 0x3a8a5a],
+  [8, 11, 0x3a8a5a], [9, 11, 0x3a8a5a], [10, 11, 0x2a7a4a], [11, 11, 0x2a7a4a],
+  [12, 11, 0x2a7a4a], [13, 11, 0x2a7a4a], [14, 11, 0x3a8a5a], [15, 11, 0x3a8a5a],
+  // Tail
+  [9, 12, 0x3a8a5a], [10, 12, 0x2a7a4a], [11, 12, 0x2a7a4a], [12, 12, 0x2a7a4a],
+  [13, 12, 0x2a7a4a], [14, 12, 0x3a8a5a],
+  [10, 13, 0x3a8a5a], [11, 13, 0x3a8a5a], [12, 13, 0x3a8a5a], [13, 13, 0x3a8a5a],
+  [11, 14, 0x2a7a4a], [12, 14, 0x2a7a4a],
+];
+
 const BOSS_SPRITES: Record<BossType, Array<[number, number, number]>> = {
   dragon: DRAGON_PIXELS,
   skeleton: SKELETON_PIXELS,
   golem: GOLEM_PIXELS,
+  hydra: HYDRA_PIXELS,
 };
 
 const BOSS_COLORS: Record<BossType, number> = {
   dragon: 0xbf6b5b,
   skeleton: 0xdbdee1,
   golem: 0x6d6f78,
+  hydra: 0x3a8a5a,
 };
 
-const BOSS_NAMES: Record<BossType, string> = {
+const BOSS_VISUAL_NAMES: Record<BossType, string> = {
   dragon: "Firebreather",
   skeleton: "Bone Lord",
   golem: "Stone Guardian",
+  hydra: "Test Hydra",
 };
 
 interface BossParticle {
@@ -164,7 +218,7 @@ export class BossEncounter extends Container {
   private hpText: Text;
   private enrageGlowGfx: Graphics;
   private damageFlashTimer = 0;
-  private readonly maxHpDisplay = 100;
+  private maxHpDisplay = 100;
 
   constructor(x: number, y: number, bossType: BossType) {
     super();
@@ -198,7 +252,7 @@ export class BossEncounter extends Container {
 
     // Boss name above health bar
     this.bossNameText = new Text({
-      text: BOSS_NAMES[bossType],
+      text: BOSS_VISUAL_NAMES[bossType],
       style: new TextStyle({ fontFamily: "monospace", fontSize: 8, fill: this.bossColor, fontWeight: "bold" }),
     });
     this.bossNameText.anchor.set(0.5, 1);
@@ -271,7 +325,10 @@ export class BossEncounter extends Container {
     if (this.attackTimer >= this.attackInterval) {
       this.attackTimer = 0;
       this.spawnSlashEffect();
-      this.spawnDamageNumber();
+      // Data-driven bosses get damage from events, not auto-attack
+      if (!this.dataType) {
+        this.spawnDamageNumber();
+      }
     }
 
     // Update slash
@@ -304,10 +361,135 @@ export class BossEncounter extends Container {
         size: 2 + Math.random() * 3,
       });
     }
+
+    // Spawn loot particles and trophy
+    this.spawnLootEffect();
+    this.spawnTrophy();
   }
 
   isDone(): boolean {
     return this.done;
+  }
+
+  /** Update boss visuals from external BossState data */
+  updateFromBossState(bossState: { currentHP: number; maxHP: number; isAlive: boolean; name: string; reason?: string }): void {
+    if (this.done) return;
+    const newHealth = bossState.maxHP > 0 ? bossState.currentHP / bossState.maxHP : 0;
+    if (newHealth < this.health && !this.resolving) {
+      const damage = Math.round((this.health - newHealth) * bossState.maxHP);
+      if (damage > 0) this.spawnDamageNumberValue(damage, damage > bossState.maxHP * 0.2);
+    }
+    this.health = newHealth;
+    this.maxHpDisplay = bossState.maxHP;
+    this.updateHealthBar();
+    this.bossNameText.text = bossState.name;
+    if (bossState.reason && !this.reasonText) {
+      this.showReason(bossState.reason);
+    }
+    if (!bossState.isAlive && !this.resolving) {
+      this.resolve();
+    }
+  }
+
+  /** Disable auto-drain for data-driven bosses */
+  setAutoDrain(rate: number): void {
+    this.drainRate = rate;
+  }
+
+  getDataType(): BossDataType | null {
+    return this.dataType;
+  }
+
+  private dataType: BossDataType | null = null;
+  private reasonText: Text | null = null;
+  private trophyGfx: Graphics | null = null;
+
+  /** Configure as a data-driven boss */
+  setDataType(type: BossDataType): void {
+    this.dataType = type;
+    this.drainRate = 0; // disable auto-drain
+    this.bossNameText.text = BOSS_DATA_NAMES[type];
+    if (type === 'siege_dragon') {
+      this.bossGfx.scale.set(1.4, 1.4);
+      this.bossGfx.position.set(-5, -5);
+    }
+  }
+
+  /** Show blocker reason as speech bubble (gate_keeper) */
+  private showReason(reason: string): void {
+    const truncated = reason.length > 40 ? reason.slice(0, 37) + '...' : reason;
+    this.reasonText = new Text({
+      text: truncated,
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 7,
+        fill: 0xdbdee1,
+        wordWrap: true,
+        wordWrapWidth: 80,
+      }),
+    });
+    this.reasonText.anchor.set(0.5, 1);
+    this.reasonText.position.set(24, -22);
+    this.addChild(this.reasonText);
+  }
+
+  /** Spawn a damage number with a specific value */
+  private spawnDamageNumberValue(value: number, critical = false): void {
+    const dmg: DamageNumber = {
+      x: 24 + (Math.random() - 0.5) * 20,
+      y: -5,
+      vy: critical ? -1.2 : -0.8,
+      value,
+      life: critical ? 55 : 40,
+    };
+    this.damageNumbers.push(dmg);
+    this.damageFlashTimer = 8;
+    const text = new Text({
+      text: `-${value}`,
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: critical ? 14 : 10,
+        fontWeight: "bold",
+        fill: critical ? 0xffff44 : 0xff4444,
+        stroke: { color: 0x000000, width: 2 },
+      }),
+    });
+    text.anchor.set(0.5, 0.5);
+    text.position.set(dmg.x, dmg.y);
+    this.addChild(text);
+    this.damageTexts.push(text);
+  }
+
+  /** Spawn loot particles on boss death */
+  private spawnLootEffect(): void {
+    const lootColors = [0xffd700, 0xbfa85b, 0x5baf7b, 0x8b6baf];
+    for (let i = 0; i < 8; i++) {
+      const angle = (Math.PI * 2 * i) / 8 + (Math.random() - 0.5) * 0.4;
+      const speed = 1.0 + Math.random() * 2;
+      this.particles.push({
+        x: 24, y: 14,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 2,
+        life: 50 + Math.random() * 30,
+        maxLife: 60,
+        color: lootColors[Math.floor(Math.random() * lootColors.length)],
+        size: 3 + Math.random() * 2,
+      });
+    }
+  }
+
+  /** Draw trophy marker that remains after boss death */
+  private spawnTrophy(): void {
+    this.trophyGfx = new Graphics();
+    const cx = 24, cy = 16;
+    this.trophyGfx.rect(cx - 4, cy - 2, 8, 6).fill({ color: 0xffd700 });
+    this.trophyGfx.rect(cx - 2, cy + 4, 4, 3).fill({ color: 0xbfa85b });
+    this.trophyGfx.rect(cx - 5, cy + 7, 10, 2).fill({ color: 0xffd700 });
+    this.trophyGfx.rect(cx - 6, cy - 1, 2, 4).fill({ color: 0xdaa520 });
+    this.trophyGfx.rect(cx + 4, cy - 1, 2, 4).fill({ color: 0xdaa520 });
+    this.trophyGfx.circle(cx, cy + 1, 2).fill({ color: 0xffffff, alpha: 0.8 });
+    this.trophyGfx.alpha = 0;
+    this.addChild(this.trophyGfx);
   }
 
   private tickDeath(dt: number): void {
@@ -331,6 +513,15 @@ export class BossEncounter extends Container {
     this.enrageGlowGfx.alpha = Math.max(0, 1 - progress * 2);
 
     this.tickParticles(dt);
+
+    // Fade reason text
+    if (this.reasonText) {
+      this.reasonText.alpha = Math.max(0, 1 - progress * 2);
+    }
+    // Fade in trophy after death
+    if (this.trophyGfx && progress > 0.6) {
+      this.trophyGfx.alpha = Math.min(1, (progress - 0.6) * 4);
+    }
 
     if (progress >= 1 && this.particles.every((p) => p.life <= 0)) {
       this.done = true;

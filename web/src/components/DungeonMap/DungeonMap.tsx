@@ -10,7 +10,7 @@ import { CharacterRenderer } from "./sprites/CharacterRenderer";
 import { Corridor } from "./Corridor";
 import { LootEffect } from "./LootEffect";
 import { AmbientCreature, type CreatureType } from "./AmbientCreature";
-import { BossEncounter, type BossType } from "./BossEncounter";
+import { BossEncounter, type BossType, BOSS_DATA_TO_VISUAL } from "./BossEncounter";
 import { CompanionPet, petTypeForRole } from "./CompanionPet";
 import { BlockedDoor } from "./BlockedDoor";
 import { DiscoveryDoor } from "./DiscoveryDoor";
@@ -195,13 +195,24 @@ export function DungeonMap() {
             }
           }
 
-          // Tick boss encounters, remove done ones
+          // Tick boss encounters, sync from store, remove done ones
+          const storeBosses = useGameState.getState().bosses;
           for (const [id, boss] of bossesRef.current) {
             if (boss.isDone()) {
               world.removeChild(boss);
               boss.destroy();
               bossesRef.current.delete(id);
             } else {
+              // Sync data-driven boss visuals from store
+              const dataType = boss.getDataType();
+              if (dataType) {
+                for (const sb of storeBosses.values()) {
+                  if (sb.bossType === dataType && sb.agentId === id) {
+                    boss.updateFromBossState(sb);
+                    break;
+                  }
+                }
+              }
               boss.tick(dt);
             }
           }
@@ -373,6 +384,10 @@ export function DungeonMap() {
         }
         // File attention heatmap — rooms glow by agent activity
         room.setHeat(aa?.activityHeat ?? 0);
+
+        // Context-sensitive decorations
+        const rh = roomHistory.get(ln.nodeId);
+        if (rh) room.updateDecorations(rh);
 
         // Error propagation fire — rooms glow red when errors cascade
         for (const prop of errorPropagations) {
@@ -613,6 +628,11 @@ export function DungeonMap() {
           sp.triggerLevelUp(agent.level);
         }
 
+        // Sync agent class from behavior profile
+        if (agent.actionProfile && sp.getAgentClass() !== agent.actionProfile.classType) {
+          sp.setAgentClass(agent.actionProfile.classType);
+        }
+
         // Spawn loot effect when agent newly completes
         if (agent.isComplete && !completedAgentsRef.current.has(agent.agentId)) {
           completedAgentsRef.current.set(agent.agentId, now);
@@ -643,18 +663,20 @@ export function DungeonMap() {
             creatureSpawnCooldownRef.current.set(agent.agentId, now);
           }
 
-          // Testing → boss encounter (test suite is the enemy)
+          // Testing → boss encounter (Test Hydra)
           if (curAction === "test" && !bossesRef.current.has(agent.agentId)) {
-            const boss = new BossEncounter(sp.position.x + 50, sp.position.y, "skeleton");
+            const boss = new BossEncounter(sp.position.x + 50, sp.position.y, BOSS_DATA_TO_VISUAL['test_hydra']);
+            boss.setDataType('test_hydra');
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
             spawnCreaturesNear(sp.position.x, sp.position.y, 2);
             creatureSpawnCooldownRef.current.set(agent.agentId, now);
           }
 
-          // Building → boss encounter (build challenge)
+          // Building → boss encounter (Forge Golem)
           if (curAction === "build" && !bossesRef.current.has(agent.agentId)) {
-            const boss = new BossEncounter(sp.position.x + 50, sp.position.y, "golem");
+            const boss = new BossEncounter(sp.position.x + 50, sp.position.y, BOSS_DATA_TO_VISUAL['forge_golem']);
+            boss.setDataType('forge_golem');
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
             creatureSpawnCooldownRef.current.set(agent.agentId, now);
@@ -701,6 +723,7 @@ export function DungeonMap() {
           // Only spawn if no boss already active
           if (!bossesRef.current.has(agent.agentId)) {
             const boss = new BossEncounter(sp.position.x + 50, sp.position.y, bossType);
+            boss.setDataType('gate_keeper');
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
           }
@@ -931,7 +954,7 @@ export function DungeonMap() {
         }
       }
     },
-    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics, burnRates]
+    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics, burnRates, roomHistory]
   );
 
   useEffect(() => {
