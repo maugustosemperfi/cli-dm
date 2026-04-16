@@ -513,6 +513,7 @@ export function DungeonMap() {
         // Dim agents that have never been active or haven't acted for 30+ seconds
         const IDLE_THRESHOLD = 30_000;
         sp.setTrulyIdle(agent.lastActiveTs === 0 || (now - agent.lastActiveTs) > IDLE_THRESHOLD);
+        sp.setLastEventTime(agent.lastActiveTs);
 
         // Detect level-up
         if (agent.level > agent.prevLevel) {

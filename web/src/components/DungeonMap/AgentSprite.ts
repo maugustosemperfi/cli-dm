@@ -144,6 +144,10 @@ export class AgentSprite extends Container {
   private targetBaseX = 0;
   private targetBaseY = 0;
 
+  // Event-driven freshness — agents only wander when receiving JSONL events
+  private lastEventTime = 0; // timestamp of last event from the backend
+  private static readonly EVENT_FRESHNESS_MS = 10_000; // 10s — wander while fresh
+
   // Trail positions
   private trailHistory: Array<[number, number]> = [];
 
@@ -322,6 +326,16 @@ export class AgentSprite extends Container {
     this.trulyIdle = idle;
   }
 
+  /** Update last event timestamp — agents only wander when events are fresh */
+  setLastEventTime(ts: number) {
+    this.lastEventTime = ts;
+  }
+
+  /** Whether this agent has received recent events (is "fresh") */
+  private isFresh(): boolean {
+    return this.lastEventTime > 0 && (Date.now() - this.lastEventTime) < AgentSprite.EVENT_FRESHNESS_MS;
+  }
+
   /** Tell the agent about neighboring rooms it can wander to */
   setNeighbors(neighbors: Array<{ nodeId: string; x: number; y: number }>) {
     this.neighbors = neighbors;
@@ -443,7 +457,7 @@ export class AgentSprite extends Container {
       network: 90,       // ritual takes time
     };
 
-    if (this.wanderState === "home" && !this.isComplete && !this.isBlocked) {
+    if (this.wanderState === "home" && !this.isComplete && !this.isBlocked && this.isFresh()) {
       this.wanderCooldown -= dt;
       if (this.wanderCooldown <= 0) {
         const chance = WANDER_CHANCE[this.currentAction] ?? 0.002;
@@ -514,10 +528,13 @@ export class AgentSprite extends Container {
       return;
     }
 
-    // Movement offset
+    // Movement offset — scale down for stale agents (no recent events)
     const action = this.isBlocked ? "blocked" : this.currentAction;
     const moveFn = MOVEMENTS[action] ?? MOVEMENTS.idle;
-    const [ox, oy] = moveFn(this.time);
+    const [rawOx, rawOy] = moveFn(this.time);
+    const moveScale = this.isFresh() ? 1.0 : 0.3; // stale agents barely bob
+    const ox = rawOx * moveScale;
+    const oy = rawOy * moveScale;
     const finalX = this.baseX + ox;
     const finalY = this.baseY + oy;
 

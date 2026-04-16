@@ -475,41 +475,81 @@ func runServer(cmd *cobra.Command, args []string) error {
 				eventSink(spawnEv)
 
 			case "watch":
-				// Track for snapshot on reconnect
-				externalAgentsMu.Lock()
-				externalAgents[agentID] = struct{ Name string; Role protocol.AgentRole }{name, role}
-				externalAgentsMu.Unlock()
-				// Tail a JSONL log file
-				watchPath := ac.WatchFile
-				if watchPath == "" && ac.Project != "" {
-					var err error
-					watchPath, err = ingestion.DiscoverActiveSession(expandHome(ac.Project))
+				// Tail JSONL log file(s). If project is set, discover ALL active sessions.
+				if ac.WatchFile != "" {
+					// Explicit file path — single watcher
+					watchPath := expandHome(ac.WatchFile)
+					externalAgentsMu.Lock()
+					externalAgents[agentID] = struct{ Name string; Role protocol.AgentRole }{name, role}
+					externalAgentsMu.Unlock()
+
+					w := ingestion.NewJSONLWatcher(watchPath, agentID, sharedMapper, eventSink, logger)
+					if err := w.Start(false); err != nil {
+						logger.Error("failed to start watcher", "id", agentID, "error", err)
+						return err
+					}
+					watchers = append(watchers, w)
+
+					spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
+						Type:    protocol.TypeAgentSpawn,
+						AgentID: agentID,
+						Name:    name,
+						Role:    role,
+						TaskID:  taskID,
+						Ts:      protocol.NowMs(),
+					})
+					eventSink(spawnEv)
+				} else if ac.Project != "" {
+					// Discover ALL active sessions for this project
+					sessions, err := ingestion.DiscoverActiveSessions(expandHome(ac.Project), 4*time.Hour)
 					if err != nil {
-						logger.Error("failed to discover session", "project", ac.Project, "error", err)
+						logger.Error("failed to discover sessions", "project", ac.Project, "error", err)
 						return fmt.Errorf("agent %d: %w", i, err)
 					}
-					logger.Info("discovered session JSONL", "agent", agentID, "path", watchPath)
-				} else {
-					watchPath = expandHome(watchPath)
-				}
+					if len(sessions) == 0 {
+						logger.Warn("no active sessions found for project", "project", ac.Project)
+						continue
+					}
 
-				w := ingestion.NewJSONLWatcher(watchPath, agentID, sharedMapper, eventSink, logger)
-				if err := w.Start(false); err != nil {
-					logger.Error("failed to start watcher", "id", agentID, "error", err)
-					return err
-				}
-				watchers = append(watchers, w)
+					for si, sess := range sessions {
+						subAgentID := agentID
+						subName := name
+						subTaskID := taskID
+						subRole := role
+						if si > 0 {
+							// Additional sessions get unique IDs
+							subAgentID = fmt.Sprintf("%s.%d", agentID, si)
+							subName = fmt.Sprintf("%s #%d", name, si+1)
+							subTaskID = fmt.Sprintf("%s-%d", taskID, si)
+							subRole = defaultRoles[(i+si)%len(defaultRoles)]
+							taskGraph.AddNode(subTaskID, subName, subAgentID)
+						}
 
-				// Emit spawn event manually
-				spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
-					Type:    protocol.TypeAgentSpawn,
-					AgentID: agentID,
-					Name:    name,
-					Role:    role,
-					TaskID:  taskID,
-					Ts:      protocol.NowMs(),
-				})
-				eventSink(spawnEv)
+						externalAgentsMu.Lock()
+						externalAgents[subAgentID] = struct{ Name string; Role protocol.AgentRole }{subName, subRole}
+						externalAgentsMu.Unlock()
+
+						w := ingestion.NewJSONLWatcher(sess.Path, subAgentID, sharedMapper, eventSink, logger)
+						if err := w.Start(false); err != nil {
+							logger.Error("failed to start watcher", "id", subAgentID, "error", err)
+							continue
+						}
+						watchers = append(watchers, w)
+
+						spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
+							Type:    protocol.TypeAgentSpawn,
+							AgentID: subAgentID,
+							Name:    subName,
+							Role:    subRole,
+							TaskID:  subTaskID,
+							Ts:      protocol.NowMs(),
+						})
+						eventSink(spawnEv)
+
+						logger.Info("watching session", "agent", subAgentID, "path", sess.Path,
+							"age", time.Since(sess.ModTime).Truncate(time.Minute))
+					}
+				}
 			}
 		}
 

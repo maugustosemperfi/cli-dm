@@ -4,17 +4,40 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+// DiscoveredSession represents a single JSONL session file with its metadata.
+type DiscoveredSession struct {
+	Path    string
+	ModTime time.Time
+}
 
 // DiscoverActiveSession finds the most recently modified JSONL session file
 // for the given project directory. Claude Code stores session files under
 // ~/.claude/projects/<encoded-project-path>/.
 func DiscoverActiveSession(projectDir string) (string, error) {
+	sessions, err := DiscoverActiveSessions(projectDir, 0)
+	if err != nil {
+		return "", err
+	}
+	if len(sessions) == 0 {
+		homeDir, _ := os.UserHomeDir()
+		encoded := encodeProjectPath(projectDir)
+		return "", fmt.Errorf("no JSONL session files found in %s", filepath.Join(homeDir, ".claude", "projects", encoded))
+	}
+	return sessions[0].Path, nil
+}
+
+// DiscoverActiveSessions finds ALL recently modified JSONL session files for
+// the given project directory. If maxAge is 0, all files are returned.
+// Results are sorted by modification time (newest first).
+func DiscoverActiveSessions(projectDir string, maxAge time.Duration) ([]DiscoveredSession, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine home dir: %w", err)
+		return nil, fmt.Errorf("cannot determine home dir: %w", err)
 	}
 
 	encoded := encodeProjectPath(projectDir)
@@ -22,37 +45,38 @@ func DiscoverActiveSession(projectDir string) (string, error) {
 
 	entries, err := os.ReadDir(projectSessionDir)
 	if err != nil {
-		return "", fmt.Errorf("cannot read session dir %s: %w", projectSessionDir, err)
+		return nil, fmt.Errorf("cannot read session dir %s: %w", projectSessionDir, err)
 	}
 
-	var bestPath string
-	var bestTime int64
+	cutoff := time.Time{}
+	if maxAge > 0 {
+		cutoff = time.Now().Add(-maxAge)
+	}
 
+	var sessions []DiscoveredSession
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
-		if !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-
-		modTime := info.ModTime().UnixNano()
-		if modTime > bestTime {
-			bestTime = modTime
-			bestPath = filepath.Join(projectSessionDir, entry.Name())
+		if maxAge > 0 && info.ModTime().Before(cutoff) {
+			continue
 		}
+		sessions = append(sessions, DiscoveredSession{
+			Path:    filepath.Join(projectSessionDir, entry.Name()),
+			ModTime: info.ModTime(),
+		})
 	}
 
-	if bestPath == "" {
-		return "", fmt.Errorf("no JSONL session files found in %s", projectSessionDir)
-	}
+	// Sort newest first
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModTime.After(sessions[j].ModTime)
+	})
 
-	return bestPath, nil
+	return sessions, nil
 }
 
 // encodeProjectPath converts an absolute path to the encoding Claude Code uses

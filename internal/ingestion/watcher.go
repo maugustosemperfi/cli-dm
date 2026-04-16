@@ -75,33 +75,69 @@ func NewJSONLWatcher(filePath, agentID string, mp *mapper.Mapper, sink EventSink
 // when starting without full catch-up. Default: 64 KB (covers ~2-5 min of activity).
 const BackfillBytes int64 = 64 * 1024
 
+// Stale session thresholds — skip backfill or auto-complete based on file age.
+const (
+	StaleBackfillThreshold  = 10 * time.Minute  // skip backfill for files idle > 10min
+	StaleCompleteThreshold  = 2 * time.Hour      // auto-complete for files idle > 2h
+)
+
 // Start begins watching the file. If catchUp is true, it reads from the
 // beginning of the file; otherwise it backfills the last ~64KB (recent activity)
 // to give an immediate snapshot of what's happening.
+//
+// Stale handling: if the file hasn't been modified in >10min, backfill is
+// skipped (tail-only). If >2h, the agent is immediately marked complete.
 func (w *JSONLWatcher) Start(catchUp bool) error {
 	f, err := os.Open(w.filePath)
 	if err != nil {
 		return err
 	}
 
-	if !catchUp {
-		info, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return err
-		}
-		// Backfill: start from (end - BackfillBytes) instead of the very end
-		// This lets us see recent activity on reconnect
-		backfillStart := info.Size() - BackfillBytes
-		if backfillStart < 0 {
-			backfillStart = 0
-		}
-		w.offset = backfillStart
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
 	}
-
 	f.Close()
 
+	staleDur := time.Since(info.ModTime())
+
+	if !catchUp {
+		if staleDur > StaleBackfillThreshold {
+			// File is stale — tail only, don't replay old events
+			w.offset = info.Size()
+			w.logger.Info("skipping backfill for stale session", "path", w.filePath,
+				"agent", w.agentID, "idle", staleDur.Truncate(time.Minute))
+		} else {
+			// Fresh session — backfill last 64KB for context
+			backfillStart := info.Size() - BackfillBytes
+			if backfillStart < 0 {
+				backfillStart = 0
+			}
+			w.offset = backfillStart
+		}
+	}
+
 	go w.watchLoop()
+
+	// Auto-complete agents from very old sessions
+	if staleDur > StaleCompleteThreshold {
+		w.staleEmitted = 2
+		ev, err := protocol.NewEvent(protocol.AgentComplete{
+			Type:     protocol.TypeAgentComplete,
+			AgentID:  w.agentID,
+			ExitCode: 0,
+			Ts:       protocol.NowMs(),
+		})
+		if err == nil {
+			w.eventSink(ev)
+		}
+		w.emitRawOutput("\033[90m— session from previous run (no activity for " +
+			staleDur.Truncate(time.Minute).String() + ") —\033[0m\r\n")
+		w.logger.Info("auto-completed stale session", "path", w.filePath,
+			"agent", w.agentID, "idle", staleDur.Truncate(time.Minute))
+	}
+
 	return nil
 }
 

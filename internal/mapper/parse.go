@@ -3,6 +3,7 @@ package mapper
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ParseStreamLine parses a single JSONL line from Claude Code's stream-json
@@ -174,18 +175,47 @@ func parseUser(raw map[string]any, agentID string) ([]ToolEvent, error) {
 		}
 
 		blockType, _ := block["type"].(string)
-		if blockType != "tool_result" {
-			continue
-		}
+		switch blockType {
+		case "tool_result":
+			te := ToolEvent{
+				Kind:      ToolEnd,
+				AgentID:   agentID,
+				ToolUseID: stringVal(block, "tool_use_id"),
+				Output:    extractToolResultContent(block),
+				IsError:   boolVal(block, "is_error"),
+			}
+			events = append(events, te)
 
-		te := ToolEvent{
-			Kind:      ToolEnd,
-			AgentID:   agentID,
-			ToolUseID: stringVal(block, "tool_use_id"),
-			Output:    extractToolResultContent(block),
-			IsError:   boolVal(block, "is_error"),
+		case "text":
+			text, _ := block["text"].(string)
+			if text == "" {
+				continue
+			}
+			// User interrupted a tool call or response
+			if strings.Contains(text, "[Request interrupted by user") {
+				events = append(events, ToolEvent{
+					Kind:     ToolEnd,
+					AgentID:  agentID,
+					ToolName: "__interrupted__",
+				})
+			} else if strings.HasPrefix(text, "Base directory for this skill:") {
+				// Skill invocation (e.g. /finish, /commit)
+				events = append(events, ToolEvent{
+					Kind:     ToolStart,
+					AgentID:  agentID,
+					ToolName: "__user_input__",
+					Input:    map[string]any{"text_length": len(text)},
+				})
+			} else if strings.Contains(text, "<task-notification>") {
+				// Subagent task completion notification
+				events = append(events, ToolEvent{
+					Kind:     ToolStart,
+					AgentID:  agentID,
+					ToolName: "__user_input__",
+					Input:    map[string]any{"text_length": len(text)},
+				})
+			}
 		}
-		events = append(events, te)
 	}
 
 	return events, nil
@@ -230,7 +260,7 @@ func extractToolResultContent(block map[string]any) string {
 func parseSystem(raw map[string]any, agentID string) ([]ToolEvent, error) {
 	subtype, _ := raw["subtype"].(string)
 	switch subtype {
-	case "compaction", "pre_compact":
+	case "compaction", "pre_compact", "compact_boundary":
 		// Context window is being compacted — "brain overloaded!"
 		return []ToolEvent{{
 			Kind:     ToolStart,
@@ -243,6 +273,20 @@ func parseSystem(raw map[string]any, agentID string) ([]ToolEvent, error) {
 			Kind:     ToolEnd,
 			AgentID:  agentID,
 			ToolName: "__thinking__",
+		}}, nil
+	case "api_error":
+		// API unreachable (auth failures, TLS errors, rate limits) — agent is stuck
+		msg := "API error"
+		if errMsg, ok := raw["error"].(string); ok && errMsg != "" {
+			msg = errMsg
+		} else if errMsg, ok := raw["message"].(string); ok && errMsg != "" {
+			msg = errMsg
+		}
+		return []ToolEvent{{
+			Kind:     ToolStart,
+			AgentID:  agentID,
+			ToolName: "__api_error__",
+			Input:    map[string]any{"message": msg},
 		}}, nil
 	default:
 		// turn_duration, etc. — no events needed

@@ -96,6 +96,11 @@ func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
 	r := state.Transition(action, detail)
 	events := r.Events
 
+	// API errors → also emit a blocker so the agent visually shows as stuck
+	if te.ToolName == "__api_error__" {
+		events = append(events, state.MarkBlocked(protocol.BlockerTimeout, "", truncate(detail, 200)))
+	}
+
 	// Agent tool → spawn a subagent character on the map
 	if te.ToolName == "Agent" && te.ToolUseID != "" {
 		name := extractString(te.Input, "name")
@@ -223,7 +228,8 @@ func mapToolName(toolName string, input map[string]any) (protocol.ActionType, st
 	case "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "SendMessage",
 		"AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 		"NotebookEdit", "Skill", "CronCreate", "CronDelete", "CronList",
-		"TaskOutput", "TaskStop", "TodoWrite":
+		"TaskOutput", "TaskStop", "TodoWrite",
+		"TeamCreate", "TeamDelete":
 		return protocol.ActionThinking, extractDetail(toolName, input)
 	case "__thinking__":
 		return protocol.ActionThinking, "reasoning"
@@ -237,6 +243,10 @@ func mapToolName(toolName string, input map[string]any) (protocol.ActionType, st
 		return protocol.ActionThinking, "compacting memory"
 	case "__permission__":
 		return protocol.ActionThinking, "awaiting permission"
+	case "__api_error__":
+		return protocol.ActionError, extractString(input, "message")
+	case "__interrupted__":
+		return protocol.ActionIdle, "interrupted by user"
 	default:
 		// MCP tools: mcp__server__tool_name
 		if strings.HasPrefix(toolName, "mcp__") {
@@ -316,6 +326,10 @@ func extractDetail(toolName string, input map[string]any) string {
 		return "reading task: " + extractString(input, "taskId")
 	case "SendMessage":
 		return "sending message"
+	case "TeamCreate":
+		return "forming party: " + extractString(input, "team_name")
+	case "TeamDelete":
+		return "disbanding party"
 	default:
 		return toolName
 	}
