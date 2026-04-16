@@ -1,7 +1,23 @@
 import { Container, Graphics, Text, TextStyle } from "pixi.js";
 import type { NodeStatus } from "../../protocol/events";
 import { THEME, ROOM_WIDTH, ROOM_HEIGHT, statusColor, AGENT_HEX } from "./theme";
-import type { RoomMetrics, MapLayer } from "../../stores/gameState";
+import type { RoomMetrics, MapLayer, RoomHistory } from "../../stores/gameState";
+
+// ── Decoration Particles ────────────────────────────────────────────────────
+
+interface DecoParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  size: number;
+  color: number;
+  type: "dust" | "spark" | "shimmer";
+}
+
+const MAX_DECO_PARTICLES = 30;
 
 const ROOF_H = 28;
 const W = ROOM_WIDTH;
@@ -503,6 +519,16 @@ export class RoomNode extends Container {
   private overlayPulseTime = 0;
   private currentOverlayType: MapLayer = "default";
   private costText: Text;
+  // Context-sensitive decorations
+  private decorationGfx: Graphics;
+  private decoParticleGfx: Graphics;
+  private decoParticles: DecoParticle[] = [];
+  private decoSpawnTimer = 0;
+  private decoTime = 0;
+  private spawnDust = false;
+  private spawnSparks = false;
+  private spawnShimmer = false;
+  private lastDecoKey = "";
 
   constructor(nodeId: string, label: string, x: number, y: number) {
     super();
@@ -539,6 +565,14 @@ export class RoomNode extends Container {
     this.overlayGfx = new Graphics();
     this.overlayGfx.alpha = 0;
     this.addChild(this.overlayGfx);
+
+    // Context-sensitive decoration layer (above building overlay)
+    this.decorationGfx = new Graphics();
+    this.addChild(this.decorationGfx);
+
+    // Decoration particle layer (animated effects)
+    this.decoParticleGfx = new Graphics();
+    this.addChild(this.decoParticleGfx);
 
     // Building type label (above building)
     this.buildingLabel = new Text({
@@ -779,6 +813,193 @@ export class RoomNode extends Container {
     return `${n}`;
   }
 
+  // ── Context-Sensitive Decorations ──────────────────────────────────────────
+
+  updateDecorations(history: RoomHistory) {
+    const now = Date.now();
+    const isIdle = history.lastActionTs > 0 && (now - history.lastActionTs) > 60000;
+    const hasErrors = history.errorCount > 0;
+    const isComplete = history.completedSuccessfully;
+    const heavyEdit = history.editCount > 10;
+    const heavyRead = history.readCount > 10;
+    const highTokens = history.totalTokens > 50000;
+
+    // Change detection — avoid unnecessary redraws
+    const key = `${history.errorCount}:${history.editCount}:${history.readCount}:${history.totalTokens}:${isComplete}:${isIdle}`;
+    if (key === this.lastDecoKey) return;
+    this.lastDecoKey = key;
+
+    this.decorationGfx.clear();
+    this.spawnDust = isIdle;
+    this.spawnSparks = heavyEdit;
+    this.spawnShimmer = highTokens;
+
+    if (hasErrors) this.drawErrorDeco(Math.min(1, history.errorCount / 5));
+    if (isComplete) this.drawCompletionDeco();
+    if (isIdle) this.drawIdleDeco();
+    if (heavyEdit) this.drawEditDeco(history.editCount);
+    if (heavyRead) this.drawReadDeco(history.readCount);
+    if (highTokens) this.drawTokenDeco(history.totalTokens);
+  }
+
+  private drawErrorDeco(intensity: number) {
+    const g = this.decorationGfx;
+
+    // Cracks on wall — jagged lines
+    const numCracks = Math.min(3, Math.ceil(intensity * 3));
+    for (let c = 0; c < numCracks; c++) {
+      const sx = 20 + c * 55;
+      const sy = 8 + c * 12;
+      g.moveTo(sx, sy);
+      let px = sx, py = sy;
+      for (let s = 0; s < 4; s++) {
+        px += (s % 2 === 0 ? 7 : -4) + c;
+        py += 5 + s * 2;
+        g.lineTo(px, py);
+      }
+      g.stroke({ color: 0x1a1c1e, width: 1.5, alpha: 0.6 });
+    }
+
+    // Red vines from edges
+    if (intensity > 0.3) {
+      for (let v = 0; v < 2; v++) {
+        const sx = v === 0 ? 0 : W;
+        const dir = v === 0 ? 1 : -1;
+        g.moveTo(sx, H * 0.6);
+        g.lineTo(sx + dir * 10, H * 0.5);
+        g.lineTo(sx + dir * 6, H * 0.38);
+        g.lineTo(sx + dir * 14, H * 0.25);
+        g.stroke({ color: 0x8b2020, width: 1, alpha: 0.4 + intensity * 0.2 });
+        // Vine leaves (small dots)
+        g.circle(sx + dir * 8, H * 0.45, 2).fill({ color: 0x6b1818, alpha: 0.35 });
+        g.circle(sx + dir * 12, H * 0.3, 1.5).fill({ color: 0x8b2020, alpha: 0.3 });
+      }
+    }
+
+    // Red glow
+    g.roundRect(-2, -2, W + 4, H + 4, 4).fill({ color: 0xbf2020, alpha: intensity * 0.04 });
+  }
+
+  private drawCompletionDeco() {
+    const g = this.decorationGfx;
+    const flowerColors = [0xdf6b8f, 0xdfcf4f, 0xdf9f4f, 0xffffff, 0x8fdf6b];
+
+    // Garden patch at base
+    g.rect(12, H + 2, W - 24, 5).fill({ color: 0x2a4a20, alpha: 0.45 });
+
+    // Flowers
+    for (let i = 0; i < 6; i++) {
+      const fx = 18 + i * 24;
+      const fy = H + 2;
+      const color = flowerColors[i % flowerColors.length];
+      // Stem
+      g.rect(fx - 0.5, fy - 3, 1, 5).fill({ color: 0x3a6a2a, alpha: 0.5 });
+      // Petals
+      g.circle(fx, fy - 3, 2.5).fill({ color, alpha: 0.65 });
+      g.circle(fx, fy - 3, 1).fill({ color: 0xffffff, alpha: 0.25 });
+    }
+
+    // Warm golden glow
+    g.roundRect(-3, -3, W + 6, H + 10, 6).fill({ color: 0xffa500, alpha: 0.025 });
+  }
+
+  private drawIdleDeco() {
+    const g = this.decorationGfx;
+    const webColor = 0x8b8b8b;
+
+    // Top-left cobweb
+    g.moveTo(1, 1).lineTo(16, 1).stroke({ color: webColor, width: 0.5, alpha: 0.25 });
+    g.moveTo(1, 1).lineTo(1, 16).stroke({ color: webColor, width: 0.5, alpha: 0.25 });
+    g.moveTo(1, 1).lineTo(12, 12).stroke({ color: webColor, width: 0.5, alpha: 0.18 });
+    g.moveTo(6, 1).lineTo(1, 6).stroke({ color: webColor, width: 0.3, alpha: 0.15 });
+    g.moveTo(11, 1).lineTo(1, 11).stroke({ color: webColor, width: 0.3, alpha: 0.12 });
+
+    // Top-right cobweb
+    g.moveTo(W - 1, 1).lineTo(W - 16, 1).stroke({ color: webColor, width: 0.5, alpha: 0.25 });
+    g.moveTo(W - 1, 1).lineTo(W - 1, 16).stroke({ color: webColor, width: 0.5, alpha: 0.25 });
+    g.moveTo(W - 1, 1).lineTo(W - 12, 12).stroke({ color: webColor, width: 0.5, alpha: 0.18 });
+    g.moveTo(W - 6, 1).lineTo(W - 1, 6).stroke({ color: webColor, width: 0.3, alpha: 0.15 });
+    g.moveTo(W - 11, 1).lineTo(W - 1, 11).stroke({ color: webColor, width: 0.3, alpha: 0.12 });
+  }
+
+  private drawEditDeco(count: number) {
+    const g = this.decorationGfx;
+
+    // Anvil near building base-right
+    const ax = W - 28;
+    const ay = H - 10;
+    g.rect(ax, ay + 4, 14, 5).fill({ color: 0x3a3a3a }); // base
+    g.rect(ax - 1, ay, 16, 5).fill({ color: 0x4a4a4a }); // top
+    g.rect(ax - 3, ay, 4, 3).fill({ color: 0x4a4a4a }); // horn
+    // Hammer
+    g.rect(ax + 8, ay - 8, 2, 8).fill({ color: 0x654321, alpha: 0.6 });
+    g.rect(ax + 5, ay - 10, 8, 3).fill({ color: 0x5a5a5a, alpha: 0.6 });
+
+    // Intensity indicator — more sparks for more edits (handled in tick via spawnSparks)
+    if (count > 20) {
+      // Extra forge glow
+      g.circle(ax + 7, ay - 2, 8).fill({ color: 0xff6600, alpha: 0.06 });
+    }
+  }
+
+  private drawReadDeco(count: number) {
+    const g = this.decorationGfx;
+    const bookColors = [0x8b4513, 0x654321, 0x4a3828, 0x5a2030, 0x2a3a5a, 0x3a5a2a];
+    const numShelves = Math.min(3, Math.ceil((count - 10) / 10));
+
+    // Bookshelves on left wall
+    for (let s = 0; s < numShelves; s++) {
+      const sy = 6 + s * 18;
+      // Shelf bracket
+      g.rect(1, sy + 12, 14, 1.5).fill({ color: 0x654321, alpha: 0.6 });
+      // Books
+      for (let b = 0; b < 5; b++) {
+        const bx = 2 + b * 2.5;
+        const bh = 5 + ((b * 3 + s * 7) % 5);
+        g.rect(bx, sy + 12 - bh, 2, bh).fill({ color: bookColors[(b + s) % bookColors.length], alpha: 0.55 });
+      }
+    }
+
+    // Scrolls on ground
+    if (count > 15) {
+      g.ellipse(28, H - 2, 4, 1.5).fill({ color: 0xd4c39a, alpha: 0.5 });
+      g.circle(26, H - 2, 1.5).fill({ color: 0xc4b38a, alpha: 0.4 });
+      g.circle(32, H - 2, 1.5).fill({ color: 0xc4b38a, alpha: 0.4 });
+    }
+    if (count > 25) {
+      g.ellipse(42, H - 3, 3.5, 1.2).fill({ color: 0xd4c39a, alpha: 0.45 });
+    }
+  }
+
+  private drawTokenDeco(tokens: number) {
+    const g = this.decorationGfx;
+    const intensity = Math.min(1, (tokens - 50000) / 100000);
+
+    // Gold coins scattered at base
+    const numCoins = 3 + Math.floor(intensity * 5);
+    for (let i = 0; i < numCoins; i++) {
+      // Deterministic positions based on index
+      const cx = 14 + ((i * 47 + 13) % (W - 28));
+      const cy = H - 1 - (i % 3) * 2;
+      g.circle(cx, cy, 2).fill({ color: 0xffd700, alpha: 0.55 });
+      g.circle(cx, cy, 0.8).fill({ color: 0xffec80, alpha: 0.3 });
+    }
+
+    // Treasure chest at high token counts
+    if (tokens > 100000) {
+      const tx = 8;
+      const ty = H - 14;
+      // Chest body
+      g.rect(tx, ty + 4, 14, 8).fill({ color: 0x8b4513, alpha: 0.7 });
+      // Chest lid
+      g.rect(tx - 1, ty + 1, 16, 4).fill({ color: 0x654321, alpha: 0.7 });
+      // Lid ridge
+      g.rect(tx, ty + 1, 14, 1).fill({ color: 0x7a5a33, alpha: 0.5 });
+      // Lock
+      g.rect(tx + 5, ty + 6, 4, 3).fill({ color: 0xffd700, alpha: 0.6 });
+    }
+  }
+
   tick(dt: number) {
     if (this.currentStatus === "in_progress") {
       this.pulseTime += dt * 0.03;
@@ -797,6 +1018,74 @@ export class RoomNode extends Container {
     if (this.overlayGfx.alpha > 0 && (this.currentOverlayType === "activity" || this.currentOverlayType === "errors")) {
       this.overlayPulseTime += dt * 0.03;
       this.overlayGfx.alpha = 0.7 + Math.sin(this.overlayPulseTime) * 0.3;
+    }
+
+    // ── Decoration particle spawning & animation ──
+    this.decoTime += dt * 0.02;
+    this.decoSpawnTimer += dt;
+    if (this.decoSpawnTimer > 8 && this.decoParticles.length < MAX_DECO_PARTICLES) {
+      this.decoSpawnTimer = 0;
+      if (this.spawnDust) {
+        this.decoParticles.push({
+          x: 6 + Math.random() * (W - 12),
+          y: H - 4 - Math.random() * 10,
+          vx: (Math.random() - 0.5) * 0.08,
+          vy: -(0.1 + Math.random() * 0.12),
+          life: 1, maxLife: 1,
+          size: 0.8 + Math.random() * 0.8,
+          color: 0x8b8b8b,
+          type: "dust",
+        });
+      }
+      if (this.spawnSparks) {
+        this.decoParticles.push({
+          x: W - 22 + Math.random() * 10,
+          y: H - 14,
+          vx: (Math.random() - 0.5) * 0.4,
+          vy: -(0.3 + Math.random() * 0.5),
+          life: 1, maxLife: 1,
+          size: 0.8 + Math.random() * 1.2,
+          color: Math.random() > 0.5 ? 0xff8c00 : 0xffa500,
+          type: "spark",
+        });
+      }
+      if (this.spawnShimmer && Math.random() < 0.3) {
+        const ci = Math.floor(Math.random() * 6);
+        this.decoParticles.push({
+          x: 14 + ((ci * 47 + 13) % (W - 28)),
+          y: H - 1 - (ci % 3) * 2,
+          vx: 0, vy: 0,
+          life: 1, maxLife: 1,
+          size: 2.5,
+          color: 0xffd700,
+          type: "shimmer",
+        });
+      }
+    }
+
+    // Update & render particles
+    if (this.decoParticles.length > 0) {
+      this.decoParticleGfx.clear();
+      for (let i = this.decoParticles.length - 1; i >= 0; i--) {
+        const p = this.decoParticles[i];
+        p.life -= dt * 0.008;
+        if (p.life <= 0) {
+          this.decoParticles.splice(i, 1);
+          continue;
+        }
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        const alpha = p.life / p.maxLife;
+
+        if (p.type === "dust") {
+          this.decoParticleGfx.circle(p.x, p.y, p.size).fill({ color: p.color, alpha: alpha * 0.25 });
+        } else if (p.type === "spark") {
+          this.decoParticleGfx.circle(p.x, p.y, p.size * alpha).fill({ color: p.color, alpha: alpha * 0.65 });
+        } else if (p.type === "shimmer") {
+          const shimmerAlpha = 0.2 + Math.sin(this.decoTime * 4 + i * 2) * 0.15;
+          this.decoParticleGfx.circle(p.x, p.y, p.size).fill({ color: p.color, alpha: shimmerAlpha * alpha });
+        }
+      }
     }
 
     // Fire decay and ember animation

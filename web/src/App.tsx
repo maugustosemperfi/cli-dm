@@ -5,6 +5,7 @@ import { Timeline } from "./components/Timeline/Timeline";
 import { AgentSidebar } from "./components/AgentSidebar/AgentSidebar";
 import { LiveFeed } from "./components/LiveFeed/LiveFeed";
 import { ScoreScreen } from "./components/ScoreScreen/ScoreScreen";
+import { QuestLog } from "./components/QuestLog/QuestLog";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/api/ws`;
@@ -56,6 +57,9 @@ export function App() {
 
       {/* Score Screen overlay (fixed, outside grid flow) */}
       <ScoreScreen />
+
+      {/* Quest Log sidebar + Volume Controls (fixed overlay) */}
+      <QuestLog />
     </div>
   );
 }
