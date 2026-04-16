@@ -62,6 +62,7 @@ export function DungeonMap() {
   const errorPropagations = useGameState((s) => s.errorPropagations);
   const activeLayer = useGameState((s) => s.activeLayer);
   const roomMetrics = useGameState((s) => s.roomMetrics);
+  const burnRates = useGameState((s) => s.burnRates);
 
   // Initialize PixiJS — wait for container to have real dimensions
   useEffect(() => {
@@ -481,6 +482,51 @@ export function DungeonMap() {
         }
       }
 
+      // Apply token burn rate visualization to corridors
+      {
+        // Total tokens across all nodes for bottleneck detection
+        let totalTokensAll = 0;
+        for (const br of burnRates.values()) totalTokensAll += br.totalTokens;
+        const tokenFlowCutoff = Date.now() - 5000; // last 5s
+
+        for (const corridor of corridorsRef.current) {
+          const fromId = corridor.fromNode.nodeId;
+          const toId = corridor.toNode.nodeId;
+          const fromBurn = burnRates.get(fromId);
+          const toBurn = burnRates.get(toId);
+
+          // Burn intensity = max rate of connected nodes
+          const maxRate = Math.max(fromBurn?.ratePerMin ?? 0, toBurn?.ratePerMin ?? 0);
+          corridor.setBurnIntensity(maxRate);
+
+          // Bottleneck = if either node has >50% of total tokens
+          if (totalTokensAll > 0) {
+            const fromRatio = (fromBurn?.totalTokens ?? 0) / totalTokensAll;
+            const toRatio = (toBurn?.totalTokens ?? 0) / totalTokensAll;
+            corridor.setBottleneck(Math.max(fromRatio, toRatio));
+          }
+
+          // Spawn token particles for recent activity
+          for (const burn of [fromBurn, toBurn]) {
+            if (!burn) continue;
+            const recentTokens = burn.tokenHistory
+              .filter((h) => h.ts >= tokenFlowCutoff)
+              .reduce((s, h) => s + h.tokens, 0);
+            if (recentTokens > 0) {
+              corridor.addTokenFlow(recentTokens);
+            }
+          }
+        }
+      }
+
+      // Apply cost display to rooms
+      for (const [nodeId, room] of rooms) {
+        const br = burnRates.get(nodeId);
+        if (br) {
+          room.setCostDisplay(br.totalTokens, br.totalCostUSD);
+        }
+      }
+
       // Apply map layer overlays to rooms and corridors
       {
         // Compute max values for normalization
@@ -875,7 +921,7 @@ export function DungeonMap() {
         }
       }
     },
-    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics]
+    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics, burnRates]
   );
 
   useEffect(() => {
@@ -896,6 +942,19 @@ export function DungeonMap() {
     },
     []
   );
+
+  // Listen for focusNodeId and pan camera to the room
+  const focusNodeId = useGameState((s) => s.focusNodeId);
+  const focusOnNode = useGameState((s) => s.focusOnNode);
+  useEffect(() => {
+    if (!focusNodeId) return;
+    const room = roomsRef.current.get(focusNodeId);
+    const camera = cameraRef.current;
+    if (room && camera) {
+      camera.focusOn(room.position.x + 90, room.position.y + 35, true);
+    }
+    focusOnNode(null); // clear after handling
+  }, [focusNodeId, focusOnNode]);
 
   // Cross-highlighting
   useEffect(() => {

@@ -502,6 +502,7 @@ export class RoomNode extends Container {
   private overlayGfx: Graphics;
   private overlayPulseTime = 0;
   private currentOverlayType: MapLayer = "default";
+  private costText: Text;
 
   constructor(nodeId: string, label: string, x: number, y: number) {
     super();
@@ -569,6 +570,16 @@ export class RoomNode extends Container {
     });
     this.assigneeText.position.set(16, 38);
     this.addChild(this.assigneeText);
+
+    // Cost counter (below building)
+    this.costText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 10, fill: 0xffd700 }),
+    });
+    this.costText.anchor.set(0.5, 0);
+    this.costText.position.set(W / 2, H + 4);
+    this.costText.alpha = 0;
+    this.addChild(this.costText);
 
     this.drawBuilding(THEME.statusPending);
   }
@@ -744,6 +755,28 @@ export class RoomNode extends Container {
         break;
       }
     }
+  }
+
+  /** Show running cost counter below the building */
+  setCostDisplay(totalTokens: number, costUSD: number) {
+    if (totalTokens === 0 && costUSD === 0) {
+      this.costText.alpha = 0;
+      return;
+    }
+    let label: string;
+    if (costUSD >= 0.01) {
+      label = costUSD < 1 ? `\u26C3 $${costUSD.toFixed(2)}` : `\u26C3 $${costUSD.toFixed(1)}`;
+    } else {
+      label = `\u26C3 ${RoomNode.fmtTokens(totalTokens)}`;
+    }
+    this.costText.text = label;
+    this.costText.alpha = 0.85;
+  }
+
+  private static fmtTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return `${n}`;
   }
 
   tick(dt: number) {

@@ -135,6 +135,23 @@ export interface BurnRate {
   ratePerMin: number;
 }
 
+// Room history — tracks what happened in each room for context-sensitive decorations
+export interface RoomHistory {
+  editCount: number;
+  readCount: number;
+  testCount: number;
+  buildCount: number;
+  totalTokens: number;
+  completedSuccessfully: boolean;
+  lastActionTs: number;
+  errorCount: number;
+}
+
+const DEFAULT_ROOM_HISTORY: RoomHistory = {
+  editCount: 0, readCount: 0, testCount: 0, buildCount: 0,
+  totalTokens: 0, completedSuccessfully: false, lastActionTs: 0, errorCount: 0,
+};
+
 export type MapLayer = "default" | "cost" | "errors" | "activity" | "fog";
 
 export interface SearchFilters {
@@ -174,6 +191,7 @@ interface GameState {
   errorPropagations: ErrorPropagation[];
   roomMetrics: Map<string, RoomMetrics>;
   burnRates: Map<string, BurnRate>;
+  roomHistory: Map<string, RoomHistory>;
   activeLayer: MapLayer;
 
   // Search & filter
@@ -243,6 +261,7 @@ export const useGameState = create<GameState>((set, get) => ({
   errorPropagations: [],
   roomMetrics: new Map(),
   burnRates: new Map(),
+  roomHistory: new Map(),
   activeLayer: "default",
 
   // Search & filter
@@ -466,6 +485,16 @@ export const useGameState = create<GameState>((set, get) => ({
             if (props.length > 20) props.splice(0, props.length - 20);
             set({ errorPropagations: props });
           }
+
+          // Room history: track error
+          const errNodeId = agentNodeId(event.agentId);
+          if (errNodeId) {
+            const roomHistory = new Map(state.roomHistory);
+            const rh = { ...(roomHistory.get(errNodeId) ?? DEFAULT_ROOM_HISTORY) };
+            rh.errorCount++;
+            roomHistory.set(errNodeId, rh);
+            set({ roomHistory });
+          }
         }
         break;
       }
@@ -548,6 +577,16 @@ export const useGameState = create<GameState>((set, get) => ({
           });
           set({ timeline: tl });
 
+          // Room history: track action start time
+          const startNodeId = agentNodeId(event.agentId);
+          if (startNodeId) {
+            const roomHistory = new Map(state.roomHistory);
+            const rh = { ...(roomHistory.get(startNodeId) ?? DEFAULT_ROOM_HISTORY) };
+            rh.lastActionTs = event.ts ?? Date.now();
+            roomHistory.set(startNodeId, rh);
+            set({ roomHistory });
+          }
+
           const detail = event.detail ? `: ${event.detail}` : "";
           pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `started ${event.action}${detail}` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_start", action: event.action, detail: event.detail });
@@ -580,6 +619,20 @@ export const useGameState = create<GameState>((set, get) => ({
           });
           set({ agents });
           savePersistedStats(agents);
+
+          // Room history: track completed action type
+          const endNodeId = agentNodeId(event.agentId);
+          if (endNodeId) {
+            const roomHistory = new Map(state.roomHistory);
+            const rh = { ...(roomHistory.get(endNodeId) ?? DEFAULT_ROOM_HISTORY) };
+            if (agent.currentAction === "edit") rh.editCount++;
+            if (agent.currentAction === "read") rh.readCount++;
+            if (agent.currentAction === "test") rh.testCount++;
+            if (agent.currentAction === "build") rh.buildCount++;
+            rh.lastActionTs = event.ts ?? Date.now();
+            roomHistory.set(endNodeId, rh);
+            set({ roomHistory });
+          }
 
           // Timeline: close open segment
           const tl = state.timeline;
@@ -620,6 +673,16 @@ export const useGameState = create<GameState>((set, get) => ({
             m.totalTokens += tokensAdded;
             m.totalCostUSD += costAdded;
           });
+
+          // Room history: track tokens
+          const statsNodeId = agentNodeId(event.agentId);
+          if (statsNodeId && tokensAdded > 0) {
+            const roomHistory = new Map(state.roomHistory);
+            const rh = { ...(roomHistory.get(statsNodeId) ?? DEFAULT_ROOM_HISTORY) };
+            rh.totalTokens += tokensAdded;
+            roomHistory.set(statsNodeId, rh);
+            set({ roomHistory });
+          }
 
           // Burn rate tracking per node
           if (tokensAdded > 0) {
@@ -708,6 +771,15 @@ export const useGameState = create<GameState>((set, get) => ({
         );
         set({ dag });
         pushLog({ category: "dag", message: `Task '${node?.label ?? event.nodeId}' → ${event.status}` });
+
+        // Room history: track completion
+        if (event.status === "completed") {
+          const roomHistory = new Map(state.roomHistory);
+          const rh = { ...(roomHistory.get(event.nodeId) ?? DEFAULT_ROOM_HISTORY) };
+          rh.completedSuccessfully = true;
+          roomHistory.set(event.nodeId, rh);
+          set({ roomHistory });
+        }
         break;
       }
 

@@ -111,6 +111,35 @@ export class Corridor extends Graphics {
     }
   }
 
+  /** Spawn token flow particles — gold (input) and cyan (output) */
+  addTokenFlow(tokens: number) {
+    const count = Math.min(20, Math.max(1, Math.floor(tokens / 1000)));
+    for (let i = 0; i < count; i++) {
+      const isInput = Math.random() < 0.6;
+      this.flowParticles.push({
+        t: Math.random() * 0.15,
+        speed: 0.005 + Math.random() * 0.004,
+        color: isInput ? 0xffd700 : 0x00e5ff,
+        alpha: 0.5 + Math.random() * 0.3,
+        size: 2 + Math.random() * 1.5,
+      });
+    }
+    if (this.flowParticles.length > 50) {
+      this.flowParticles.splice(0, this.flowParticles.length - 50);
+    }
+  }
+
+  /** Set burn intensity for corridor width pulse (0-1 normalized) */
+  setBurnIntensity(ratePerMin: number) {
+    // Normalize: 10k tokens/min = full intensity
+    this.burnPulse = Math.min(1, ratePerMin / 10000);
+  }
+
+  /** Set bottleneck ratio — shows warning when >0.5 */
+  setBottleneck(ratio: number) {
+    this.bottleneckRatio = ratio;
+  }
+
   /** Set overlay tinting for the active map layer */
   setOverlay(layer: MapLayer, fromMetrics: RoomMetrics | null, toMetrics: RoomMetrics | null, maxTokens: number, maxErrors: number) {
     this.overlayGfx.clear();
@@ -404,6 +433,30 @@ export class Corridor extends Graphics {
         this.lineTo(this.spine[i][0], this.spine[i][1]);
       }
       this.stroke({ color: heatColor, width: CORRIDOR_HALF_W * 0.8, alpha: this.accumulatedHeat * 0.12 });
+    }
+
+    // --- Token burn pulse glow ---
+    if (this.burnPulse > 0.05) {
+      this.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        this.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      const pulseWidth = CORRIDOR_HALF_W * 0.6 + this.burnPulse * 3;
+      this.stroke({ color: 0xffd700, width: pulseWidth, alpha: this.burnPulse * 0.08 });
+    }
+
+    // --- Bottleneck warning indicator ---
+    if (this.bottleneckRatio > 0.5) {
+      const midIdx = Math.floor(SPINE_STEPS / 2);
+      const [mx, my] = this.spine[midIdx];
+      const s = 6 + (this.bottleneckRatio - 0.5) * 8; // 6-10px
+      // Pulsing orange diamond
+      this.moveTo(mx, my - s).lineTo(mx + s, my).lineTo(mx, my + s).lineTo(mx - s, my).closePath();
+      this.fill({ color: 0xff8c00, alpha: 0.4 + this.bottleneckRatio * 0.3 });
+      // Inner diamond
+      const si = s * 0.5;
+      this.moveTo(mx, my - si).lineTo(mx + si, my).lineTo(mx, my + si).lineTo(mx - si, my).closePath();
+      this.fill({ color: 0xffa500, alpha: 0.6 });
     }
 
     // --- Blocked marker: X at midpoint ---
