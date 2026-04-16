@@ -52,7 +52,7 @@ export function DungeonMap() {
   const prevActionsRef = useRef(new Map<string, string>()); // agentId → last action
   const creatureSpawnCooldownRef = useRef(new Map<string, number>()); // agentId → timestamp
   const spawnLinksRef = useRef(new Map<string, SpawnLink>());
-  const prevNodeIdsRef = useRef(new Set<string>());
+  const prevNodeIdsRef = useRef<Set<string> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const dag = useGameState((s) => s.dag);
@@ -365,7 +365,7 @@ export function DungeonMap() {
         }
       }
 
-      const layout = computeLayout(dag, nodeWeights, prevNodeIdsRef.current);
+      const layout = computeLayout(dag, nodeWeights, prevNodeIdsRef.current ?? undefined);
 
       // Update prevNodeIds for next frame's new-node detection
       const currentNodeIds = new Set<string>();
@@ -413,11 +413,13 @@ export function DungeonMap() {
         // Organic scale — lerp toward target for smooth transitions
         const targetScale = ln.scale;
         const curScale = room.scale.x;
-        const newScale = curScale + (targetScale - curScale) * 0.08;
-        room.scale.set(newScale);
-        // Growth fade-in
+        if (Math.abs(curScale - targetScale) > 0.01) {
+          const newScale = curScale + (targetScale - curScale) * 0.2;
+          room.scale.set(newScale);
+        }
+        // Growth fade-in (fast)
         if (room.alpha < 1) {
-          room.alpha = Math.min(1, room.alpha + 0.04);
+          room.alpha = Math.min(1, room.alpha + 0.15);
         }
         const aa = agents.get(dn.assignee ?? "");
         room.update(dn.status, aa?.name, aa?.role, aa?.currentAction);

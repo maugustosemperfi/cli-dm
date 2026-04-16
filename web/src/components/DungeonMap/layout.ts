@@ -124,9 +124,9 @@ export function computeLayout(
       const jx = seededRand(hash, 0) * JITTER_X;
       const jy = seededRand(hash, 1) * JITTER_Y;
 
-      // Scale from weight (0.85 default when no weight data)
+      // Scale from weight (1.0 default, scales up with activity)
       const w = weightMap.get(nodeId) ?? 0;
-      const scale = 0.85 + w * 0.45; // 0.85 → 1.3
+      const scale = 1.0 + w * 0.3; // 1.0 → 1.3
 
       const node: LayoutNode = {
         nodeId,
@@ -231,12 +231,12 @@ export function computeLayout(
           leafOffsetY = Math.sin(angle) * LEAF_OFFSET * sign;
         }
 
-        // Scale from weight
+        // Scale from weight (1.0 default, scales up with activity)
         const w = weightMap.get(nodeId) ?? 0;
-        let scale = 0.85 + w * 0.45;
-        // Leaves are slightly smaller, roots slightly larger
-        if (isLeaf) scale *= 0.9;
-        if (isRoot && li === 0) scale = Math.max(scale, 1.1);
+        let scale = 1.0 + w * 0.3;
+        // Leaves slightly smaller, roots slightly larger
+        if (isLeaf) scale *= 0.92;
+        if (isRoot && li === 0) scale = Math.max(scale, 1.05);
 
         const node: LayoutNode = {
           nodeId,
