@@ -148,7 +148,7 @@ export function Minimap({ dag, agents, camera, onClickWorld }: MinimapProps) {
       style={{
         position: "absolute",
         top: 8,
-        right: 8,
+        left: 8,
         zIndex: 10,
         borderRadius: 4,
         border: "1px solid #3f4147",

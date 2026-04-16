@@ -44,6 +44,11 @@ type JSONLWatcher struct {
 	once      sync.Once
 	agentID   string
 
+	// firstRead is true until the first successful read. When backfilling from
+	// mid-file, the first line may be a partial JSON entry (the seek landed in
+	// the middle of a line), so we skip it on the first poll.
+	firstRead bool
+
 	// Subagent tracking: detect new agentIDs appearing in JSONL
 	knownAgents map[string]bool
 	subCount    int
@@ -66,6 +71,7 @@ func NewJSONLWatcher(filePath, agentID string, mp *mapper.Mapper, sink EventSink
 		filePath:    filePath,
 		done:        make(chan struct{}),
 		agentID:     agentID,
+		firstRead:   true,
 		knownAgents: known,
 		inferStates: make(map[string]*inferredState),
 	}
@@ -260,8 +266,27 @@ func (w *JSONLWatcher) poll() {
 	// New data arrived — agent is alive, reset stale tier
 	w.staleEmitted = 0
 
-	// Split into lines and process each complete line
+	// Split into lines and process each complete line.
 	lines := bytes.Split(data, []byte("\n"))
+
+	// Fix 3: if the data doesn't end with a newline, the last element is a
+	// partial line whose tail hasn't been written yet. Roll back the offset so
+	// it gets re-read (and completed) on the next poll cycle.
+	if len(data) > 0 && data[len(data)-1] != '\n' && len(lines) > 0 {
+		partial := lines[len(lines)-1]
+		lines = lines[:len(lines)-1]
+		w.offset -= int64(len(partial))
+	}
+
+	// Fix 1: when we seeked into the middle of the file for backfill the very
+	// first element may be a partial (broken) JSON line — drop it once.
+	if w.firstRead {
+		w.firstRead = false
+		if len(lines) > 0 {
+			lines = lines[1:]
+		}
+	}
+
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {

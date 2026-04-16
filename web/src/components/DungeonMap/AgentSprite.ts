@@ -234,6 +234,20 @@ export class AgentSprite extends Container {
     this.levelBadge.alpha = 0;
     this.addChild(this.levelBadge);
 
+    // Cost badge (below level badge)
+    this.costBadge = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 9,
+        fill: 0x5baf7b,
+      }),
+    });
+    this.costBadge.anchor.set(0.5, 0);
+    this.costBadge.position.set(0, CHAR_HEIGHT / 2 + 25);
+    this.costBadge.alpha = 0;
+    this.addChild(this.costBadge);
+
     // Speech bubble (above character)
     this.speechBubble = new SpeechBubble();
     const bubbleY = -CHAR_HEIGHT / 2 - 8;
@@ -255,6 +269,7 @@ export class AgentSprite extends Container {
   private levelUpTimer = 0;
   private levelUpRing: Graphics;
   private levelBadge: Text;
+  private costBadge: Text;
   private compactTimer = 0;
   private compactParticles: Array<{ x: number; y: number; vx: number; vy: number; life: number }> = [];
 
@@ -329,6 +344,19 @@ export class AgentSprite extends Container {
   /** Update last event timestamp — agents only wander when events are fresh */
   setLastEventTime(ts: number) {
     this.lastEventTime = ts;
+  }
+
+  /** Display accumulated cost (in cents) as a gold badge */
+  setCost(cents: number) {
+    if (cents <= 0) {
+      this.costBadge.alpha = 0;
+      return;
+    }
+    const dollars = cents / 100;
+    this.costBadge.text = dollars < 1
+      ? `¢${cents.toFixed(1)}`
+      : `$${dollars.toFixed(2)}`;
+    this.costBadge.alpha = 1;
   }
 
   /** Whether this agent has received recent events (is "fresh") */

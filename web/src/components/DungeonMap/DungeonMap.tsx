@@ -23,8 +23,7 @@ import { Camera } from "./Camera";
 import { THEME } from "./theme";
 import { Minimap } from "../Minimap/Minimap";
 import { soundManager } from "../../audio/SoundManager";
-import { StatsHUD } from "../StatsHUD/StatsHUD";
-import { HeartbeatHUD } from "../HeartbeatHUD/HeartbeatHUD";
+import { SpawnLink } from "./SpawnLink";
 
 export function DungeonMap() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,6 +50,7 @@ export function DungeonMap() {
   const blockedAgentsRef = useRef(new Set<string>());
   const prevActionsRef = useRef(new Map<string, string>()); // agentId → last action
   const creatureSpawnCooldownRef = useRef(new Map<string, number>()); // agentId → timestamp
+  const spawnLinksRef = useRef(new Map<string, SpawnLink>());
   const [error, setError] = useState<string | null>(null);
 
   const dag = useGameState((s) => s.dag);
@@ -163,6 +163,7 @@ export function DungeonMap() {
           for (const room of roomsRef.current.values()) room.tick(dt);
           for (const sprite of spritesRef.current.values()) sprite.tick(dt);
           for (const corridor of corridorsRef.current) corridor.tick(dt);
+          for (const link of spawnLinksRef.current.values()) link.tick(dt);
 
           // Collect agent positions for creatures + greetings
           const agentPositions: Array<{ id: string; x: number; y: number; isIdle: boolean; isComplete: boolean }> = [];
@@ -317,6 +318,8 @@ export function DungeonMap() {
       if (fogRef.current) { fogRef.current.destroy(); fogRef.current = null; }
       for (const b of bannersRef.current) b.destroy();
       bannersRef.current = [];
+      for (const link of spawnLinksRef.current.values()) link.destroy();
+      spawnLinksRef.current.clear();
     };
   }, []);
 
@@ -510,6 +513,7 @@ export function DungeonMap() {
         }
         sp.setName(agent.name);
         sp.update(agent.currentAction, agent.isBlocked ?? false, agent.isComplete ?? false, agent.currentDetail);
+        sp.setCost(agent.gold);
         // Dim agents that have never been active or haven't acted for 30+ seconds
         const IDLE_THRESHOLD = 30_000;
         sp.setTrulyIdle(agent.lastActiveTs === 0 || (now - agent.lastActiveTs) > IDLE_THRESHOLD);
@@ -755,6 +759,67 @@ export function DungeonMap() {
 
             sp.moveTo(ln.x, ln.y);
           }
+        } else {
+          // No DAG node — subagent. Spawn inside parent's room.
+          // Subagent IDs use "parentId:name" format (e.g. "t1:researcher")
+          // or "parentId.N" format for multi-session agents.
+          const colonIdx = agent.agentId.indexOf(":");
+          const parentId = colonIdx > 0
+            ? agent.agentId.substring(0, colonIdx)
+            : null;
+          if (parentId) {
+            // Find parent's DAG node and position there with a small offset
+            const parentDn = dag.nodes.find((n) => n.assignee === parentId);
+            if (parentDn) {
+              const parentLn = layout.nodes.find((n) => n.nodeId === parentDn.nodeId);
+              if (parentLn) {
+                // Offset slightly so subagents don't stack exactly on the parent
+                const hash = agent.agentId.split("").reduce((h, c) => h * 31 + c.charCodeAt(0), 0);
+                const angle = (hash % 360) * (Math.PI / 180);
+                const offsetDist = 20 + (hash % 30);
+                sp.moveTo(
+                  parentLn.x + Math.cos(angle) * offsetDist,
+                  parentLn.y + Math.sin(angle) * offsetDist,
+                );
+                // Share parent's neighbors so subagent can wander the same corridors
+                const neighborNodes: Array<{ nodeId: string; x: number; y: number }> = [];
+                const addedNeighbors = new Set<string>();
+                for (const key of connectedPairs) {
+                  const [fromId, toId] = key.split(":");
+                  let neighborId: string | null = null;
+                  if (fromId === parentDn.nodeId) neighborId = toId;
+                  if (toId === parentDn.nodeId) neighborId = fromId;
+                  if (neighborId && !addedNeighbors.has(neighborId)) {
+                    const nln = layout.nodes.find((n) => n.nodeId === neighborId);
+                    if (nln) {
+                      neighborNodes.push({ nodeId: neighborId, x: nln.x, y: nln.y });
+                      addedNeighbors.add(neighborId);
+                    }
+                  }
+                }
+                sp.setNeighbors(neighborNodes);
+
+                // Create/update spawn link from parent to child
+                const parentSprite = sprites.get(parentId);
+                if (parentSprite && sp) {
+                  let link = spawnLinksRef.current.get(agent.agentId);
+                  if (!link) {
+                    link = new SpawnLink(
+                      parentSprite.position.x, parentSprite.position.y,
+                      sp.position.x, sp.position.y,
+                      agent.role
+                    );
+                    spawnLinksRef.current.set(agent.agentId, link);
+                    world.addChildAt(link, 1); // corridor layer
+                  }
+                  link.updatePositions(
+                    parentSprite.position.x, parentSprite.position.y,
+                    sp.position.x, sp.position.y
+                  );
+                }
+              }
+            }
+          }
         }
       }
       // Remove completed agents after 10 seconds
@@ -772,6 +837,8 @@ export function DungeonMap() {
           sprites.delete(id);
           const pet = petsRef.current.get(id);
           if (pet) { world.removeChild(pet); pet.destroy(); petsRef.current.delete(id); }
+          const link = spawnLinksRef.current.get(id);
+          if (link) { world.removeChild(link); link.destroy(); spawnLinksRef.current.delete(id); }
         }
       }
     },
@@ -823,8 +890,6 @@ export function DungeonMap() {
         camera={cameraRef.current}
         onClickWorld={handleMinimapClick}
       />
-      <StatsHUD />
-      <HeartbeatHUD />
     </div>
   );
 }

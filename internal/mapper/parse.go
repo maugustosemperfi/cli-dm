@@ -295,7 +295,11 @@ func parseSystem(raw map[string]any, agentID string) ([]ToolEvent, error) {
 }
 
 // ExtractTokensFromMessage extracts usage data from an assistant message.
-// Returns (inputTokens, outputTokens, costUSD, ok).
+// Returns (inputTokens, outputTokens, estimatedCostUSD, ok).
+//
+// Claude Code JSONL does NOT include costUSD — we estimate from token counts
+// using Opus 4.6 pricing: $15/M input, $75/M output, $3.75/M cache read,
+// $18.75/M cache write.
 func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) {
 	// Check for usage field in the message or top-level
 	var usage map[string]any
@@ -311,14 +315,25 @@ func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) 
 
 	input, _ := usage["input_tokens"].(float64)
 	output, _ := usage["output_tokens"].(float64)
+	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
+	cacheWrite, _ := usage["cache_creation_input_tokens"].(float64)
 
-	// Check for cost field
-	cost, _ := raw["costUSD"].(float64)
-	if cost == 0 {
-		if msg, _ := raw["message"].(map[string]any); msg != nil {
-			cost, _ = msg["costUSD"].(float64)
-		}
+	// Estimate cost from token counts (Opus 4 pricing per million tokens)
+	const (
+		inputPricePerM      = 15.0
+		outputPricePerM     = 75.0
+		cacheReadPricePerM  = 3.75
+		cacheWritePricePerM = 18.75
+	)
+	// Non-cached input = total input minus cache hits
+	plainInput := input - cacheRead
+	if plainInput < 0 {
+		plainInput = 0
 	}
+	cost := (plainInput * inputPricePerM / 1_000_000) +
+		(output * outputPricePerM / 1_000_000) +
+		(cacheRead * cacheReadPricePerM / 1_000_000) +
+		(cacheWrite * cacheWritePricePerM / 1_000_000)
 
 	return int64(input), int64(output), cost, input > 0 || output > 0
 }

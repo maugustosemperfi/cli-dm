@@ -559,8 +559,34 @@ export const useGameState = create<GameState>((set, get) => ({
         break;
       }
 
-      // raw.stdout / raw.stderr are handled directly by TerminalPane
-      // (written to xterm.js instances), not stored in global state
+      case "raw.stdout":
+      case "raw.stderr": {
+        // Decode base64 and push as transcript entries
+        try {
+          const decoded = atob(event.data);
+          // Strip ANSI escape codes for display
+          const clean = decoded.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim();
+          if (clean.length === 0) break;
+
+          // Split into lines and push each as a transcript entry
+          const lines = clean.split(/\r?\n/).filter(l => l.trim().length > 0);
+          const agent = state.agents.get(event.agentId);
+          const newEntries = lines.slice(0, 5).map(line => ({  // cap at 5 lines per chunk
+            ts: event.ts ?? Date.now(),
+            agentId: event.agentId,
+            agentName: agent?.name,
+            agentRole: agent?.role,
+            kind: "tool_end" as const,  // use tool_end kind for dimmed styling
+            action: event.type === "raw.stderr" ? "stderr" : "stdout",
+            detail: line.slice(0, 200),  // truncate long lines
+          }));
+
+          const transcript = [...state.transcript, ...newEntries];
+          if (transcript.length > MAX_TRANSCRIPT) transcript.splice(0, transcript.length - MAX_TRANSCRIPT);
+          set({ transcript });
+        } catch { /* ignore decode errors */ }
+        break;
+      }
     }
   },
 }));
