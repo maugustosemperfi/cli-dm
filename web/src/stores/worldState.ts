@@ -31,6 +31,7 @@ interface WorldState {
 
   setCurrentSession: (id: string) => void;
   addSession: (wing: SessionWing) => void;
+  updateSession: (id: string, updates: Partial<Omit<SessionWing, "sessionId" | "worldX" | "worldY">>) => void;
   toggleWorldMap: () => void;
   loadFromStorage: () => void;
   saveToStorage: () => void;
@@ -59,6 +60,14 @@ export const useWorldState = create<WorldState>((set, get) => ({
       wing.worldY = Math.sin(angle) * radius;
       sessions.push(wing);
     }
+    set({ sessions });
+    get().saveToStorage();
+  },
+
+  updateSession: (id, updates) => {
+    const sessions = get().sessions.map((s) =>
+      s.sessionId === id ? { ...s, ...updates } : s,
+    );
     set({ sessions });
     get().saveToStorage();
   },

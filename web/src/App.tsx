@@ -1,5 +1,6 @@
 import { createContext, useContext, useState } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
+import { useWorldSync } from "./hooks/useWorldSync";
 import { DungeonMap } from "./components/DungeonMap/DungeonMap";
 import { StatusBar } from "./components/StatusBar/StatusBar";
 import { Timeline } from "./components/Timeline/Timeline";
@@ -47,6 +48,9 @@ export function App() {
       totalTokens: 0,
     });
   });
+
+  // Sync gameState metrics → worldState session
+  useWorldSync();
 
   return (
     <CommandContext.Provider value={sendCommand}>
