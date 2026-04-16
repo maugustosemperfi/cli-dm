@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useState } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { DungeonMap } from "./components/DungeonMap/DungeonMap";
 import { StatusBar } from "./components/StatusBar/StatusBar";
@@ -8,6 +8,8 @@ import { LiveFeed } from "./components/LiveFeed/LiveFeed";
 import { ScoreScreen } from "./components/ScoreScreen/ScoreScreen";
 import { QuestLog } from "./components/QuestLog/QuestLog";
 import { CommandPalette } from "./components/DungeonMap/CommandPalette";
+import { WorldMap } from "./components/WorldMap/WorldMap";
+import { useWorldState } from "./stores/worldState";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/api/ws`;
@@ -18,6 +20,33 @@ export const useCommand = () => useContext(CommandContext);
 
 export function App() {
   const { sendCommand } = useWebSocket({ url: WS_URL });
+
+  // Load persistent world state on mount
+  const loadFromStorage = useWorldState((s) => s.loadFromStorage);
+  const addSession = useWorldState((s) => s.addSession);
+  const setCurrentSession = useWorldState((s) => s.setCurrentSession);
+
+  // Initialize world state from localStorage
+  useState(() => {
+    loadFromStorage();
+    // Register current session
+    const sessionId = `session-${Date.now()}`;
+    setCurrentSession(sessionId);
+    addSession({
+      sessionId,
+      name: document.title || "Current Session",
+      startedAt: Date.now(),
+      endedAt: 0,
+      agentCount: 0,
+      taskCount: 0,
+      status: "running",
+      worldX: 0,
+      worldY: 0,
+      totalXP: 0,
+      totalGold: 0,
+      totalTokens: 0,
+    });
+  });
 
   return (
     <CommandContext.Provider value={sendCommand}>
@@ -70,6 +99,9 @@ export function App() {
 
       {/* Command Palette — appears when right-clicking rooms */}
       <CommandPalette />
+
+      {/* World Map — shows all past sessions */}
+      <WorldMap />
     </div>
     </CommandContext.Provider>
   );
