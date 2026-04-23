@@ -1,8 +1,10 @@
 /**
- * SoundManager — synthesizes retro 8-bit sounds via Web Audio API.
+ * SoundManager — synthesizes retro 8-bit one-shot sound effects via Web Audio.
  *
  * No external audio files required. AudioContext is created lazily on first
- * play to comply with browser autoplay policies.
+ * play to comply with browser autoplay policies. All audio here is event-driven
+ * (action sounds, level-up, achievement, etc.); there is no ambient/background
+ * soundscape.
  */
 
 import type { ActionType } from "../protocol/events";
@@ -10,25 +12,8 @@ import type { ActionType } from "../protocol/events";
 class SoundManager {
   private ctx: AudioContext | null = null;
   private enabled = true;
-
-  // --- Ambient state ---
-  private ambientOsc: OscillatorNode | null = null;
-  private ambientGain: GainNode | null = null;
-  private ambientLfoOsc: OscillatorNode | null = null;
-  private ambientLfoGain: GainNode | null = null;
-  private ambientNoiseSource: AudioBufferSourceNode | null = null;
-  private ambientNoiseGain: GainNode | null = null;
-  private dissonanceOscs: OscillatorNode[] = [];
-  private dissonanceGain: GainNode | null = null;
-  private isAmbientPlaying = false;
-  private ambientEnabled = true;
-  private ambientVolume = 0.15;
   private masterVolume = 0.5;
   private zoomVolume = 1.0;
-  private activityLevel = 0; // 0-1
-  private isNight = false;
-  private dayNightIntervalId: ReturnType<typeof setInterval> | null = null;
-  private hasErrors = false;
 
   /** Lazily create (or resume) the AudioContext. */
   private async getContext(): Promise<AudioContext> {
@@ -41,165 +26,19 @@ class SoundManager {
     return this.ctx;
   }
 
-  /** Effective gain accounting for master, zoom, and ambient volumes. */
-  private effectiveAmbientGain(): number {
-    return this.ambientVolume * this.masterVolume * this.zoomVolume;
-  }
-
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
 
   toggle(): void {
     this.enabled = !this.enabled;
-    if (!this.enabled) this.stopAmbient();
   }
 
   isEnabled(): boolean {
     return this.enabled;
   }
 
-  // ---------------------------------------------------------------------------
-  // Ambient Engine
-  // ---------------------------------------------------------------------------
-
-  async startAmbient(): Promise<void> {
-    if (this.isAmbientPlaying || !this.ambientEnabled) return;
-    const ctx = await this.getContext();
-    this.isAmbientPlaying = true;
-
-    // Base drone — sine wave, low pitch
-    this.ambientOsc = ctx.createOscillator();
-    this.ambientOsc.type = "sine";
-    this.ambientOsc.frequency.setValueAtTime(80, ctx.currentTime);
-
-    // LFO for subtle wobble
-    this.ambientLfoOsc = ctx.createOscillator();
-    this.ambientLfoOsc.frequency.setValueAtTime(0.5, ctx.currentTime);
-    this.ambientLfoGain = ctx.createGain();
-    this.ambientLfoGain.gain.setValueAtTime(3, ctx.currentTime);
-    this.ambientLfoOsc.connect(this.ambientLfoGain);
-    this.ambientLfoGain.connect(this.ambientOsc.frequency);
-    this.ambientLfoOsc.start();
-
-    // Main gain envelope
-    this.ambientGain = ctx.createGain();
-    this.ambientGain.gain.setValueAtTime(this.effectiveAmbientGain(), ctx.currentTime);
-    this.ambientOsc.connect(this.ambientGain).connect(ctx.destination);
-    this.ambientOsc.start();
-
-    // Noise layer (off initially, increases with activity)
-    const bufferSize = ctx.sampleRate * 2;
-    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-
-    this.ambientNoiseSource = ctx.createBufferSource();
-    this.ambientNoiseSource.buffer = noiseBuffer;
-    this.ambientNoiseSource.loop = true;
-
-    this.ambientNoiseGain = ctx.createGain();
-    this.ambientNoiseGain.gain.setValueAtTime(0, ctx.currentTime);
-
-    const bpFilter = ctx.createBiquadFilter();
-    bpFilter.type = "bandpass";
-    bpFilter.frequency.setValueAtTime(200, ctx.currentTime);
-    bpFilter.Q.setValueAtTime(1.5, ctx.currentTime);
-
-    this.ambientNoiseSource.connect(bpFilter).connect(this.ambientNoiseGain).connect(ctx.destination);
-    this.ambientNoiseSource.start();
-
-    // Dissonance layer (controlled by error state)
-    this.dissonanceGain = ctx.createGain();
-    this.dissonanceGain.gain.setValueAtTime(0, ctx.currentTime);
-    this.dissonanceGain.connect(ctx.destination);
-
-    const detunedFreqs = [110, 116.5]; // slightly detuned for beat frequency
-    for (const freq of detunedFreqs) {
-      const osc = ctx.createOscillator();
-      osc.type = "sawtooth";
-      osc.frequency.setValueAtTime(freq, ctx.currentTime);
-      osc.connect(this.dissonanceGain);
-      osc.start();
-      this.dissonanceOscs.push(osc);
-    }
-
-    // Start day/night ambient sounds
-    this.scheduleDayNightSounds();
-  }
-
-  stopAmbient(): void {
-    if (!this.isAmbientPlaying) return;
-    this.isAmbientPlaying = false;
-
-    try { this.ambientOsc?.stop(); } catch { /* already stopped */ }
-    try { this.ambientLfoOsc?.stop(); } catch { /* already stopped */ }
-    try { this.ambientNoiseSource?.stop(); } catch { /* already stopped */ }
-    for (const osc of this.dissonanceOscs) {
-      try { osc.stop(); } catch { /* already stopped */ }
-    }
-    this.dissonanceOscs = [];
-
-    this.ambientOsc = null;
-    this.ambientGain = null;
-    this.ambientLfoOsc = null;
-    this.ambientLfoGain = null;
-    this.ambientNoiseSource = null;
-    this.ambientNoiseGain = null;
-    this.dissonanceGain = null;
-
-    if (this.dayNightIntervalId !== null) {
-      clearInterval(this.dayNightIntervalId);
-      this.dayNightIntervalId = null;
-    }
-  }
-
-  setAmbientEnabled(on: boolean): void {
-    this.ambientEnabled = on;
-    if (!on) this.stopAmbient();
-    else if (this.enabled && !this.isAmbientPlaying) this.startAmbient();
-  }
-
-  isAmbientEnabled(): boolean {
-    return this.ambientEnabled;
-  }
-
-  /** Activity level 0-1 adjusts ambient pitch and noise volume. */
-  setActivityLevel(level: number): void {
-    this.activityLevel = Math.max(0, Math.min(1, level));
-    if (!this.ctx || !this.isAmbientPlaying) return;
-    const now = this.ctx.currentTime;
-
-    // Drone frequency: 80Hz (quiet) → 200Hz (busy)
-    const freq = 80 + this.activityLevel * 120;
-    this.ambientOsc?.frequency.linearRampToValueAtTime(freq, now + 0.5);
-
-    // LFO speed increases with activity
-    this.ambientLfoOsc?.frequency.linearRampToValueAtTime(0.5 + this.activityLevel * 2, now + 0.5);
-
-    // Noise layer fades in with activity (0 → 0.04)
-    const noiseVol = this.activityLevel * 0.04 * this.masterVolume * this.zoomVolume;
-    this.ambientNoiseGain?.gain.linearRampToValueAtTime(noiseVol, now + 0.5);
-  }
-
-  /** Switch day/night ambient character. */
-  setDayNight(night: boolean): void {
-    if (this.isNight === night) return;
-    this.isNight = night;
-    // The day/night sound scheduler will pick up the change
-  }
-
-  /** Error atmosphere — enable/disable dissonant undertone. */
-  setErrorAtmosphere(hasErrors: boolean): void {
-    if (this.hasErrors === hasErrors) return;
-    this.hasErrors = hasErrors;
-    if (!this.ctx || !this.dissonanceGain) return;
-    const now = this.ctx.currentTime;
-    const targetGain = hasErrors ? 0.03 * this.masterVolume * this.zoomVolume : 0;
-    this.dissonanceGain.gain.linearRampToValueAtTime(targetGain, now + 2);
-  }
-
-  /** Camera zoom → volume mapping. */
+  /** Camera zoom → volume mapping for event SFX. */
   setZoomVolume(zoom: number): void {
     // zoom 0.3→0.3, zoom 1.0→1.0, zoom 2.0→0.8
     if (zoom <= 1.0) {
@@ -208,114 +47,14 @@ class SoundManager {
       this.zoomVolume = 1.0 - (zoom - 1.0) * 0.2;
     }
     this.zoomVolume = Math.max(0.1, Math.min(1.0, this.zoomVolume));
-    this.updateAmbientVolume();
   }
 
   setMasterVolume(vol: number): void {
     this.masterVolume = Math.max(0, Math.min(1, vol));
-    this.updateAmbientVolume();
   }
 
   getMasterVolume(): number {
     return this.masterVolume;
-  }
-
-  private updateAmbientVolume(): void {
-    if (!this.ctx || !this.ambientGain) return;
-    const now = this.ctx.currentTime;
-    this.ambientGain.gain.linearRampToValueAtTime(this.effectiveAmbientGain(), now + 0.1);
-    // Re-apply activity-dependent noise volume
-    const noiseVol = this.activityLevel * 0.04 * this.masterVolume * this.zoomVolume;
-    this.ambientNoiseGain?.gain.linearRampToValueAtTime(noiseVol, now + 0.1);
-    // Re-apply error dissonance
-    if (this.dissonanceGain) {
-      const disVol = this.hasErrors ? 0.03 * this.masterVolume * this.zoomVolume : 0;
-      this.dissonanceGain.gain.linearRampToValueAtTime(disVol, now + 0.1);
-    }
-  }
-
-  // --- Day/night ambient creature sounds ---
-
-  private scheduleDayNightSounds(): void {
-    if (this.dayNightIntervalId !== null) return;
-    this.dayNightIntervalId = setInterval(() => {
-      if (!this.enabled || !this.isAmbientPlaying || !this.ambientEnabled) return;
-      // Random chance each tick (every 3s)
-      if (Math.random() > 0.4) return;
-      if (this.isNight) {
-        if (Math.random() < 0.6) this.playCricket();
-        else this.playOwlHoot();
-      } else {
-        this.playBirdChirp();
-      }
-    }, 3000);
-  }
-
-  private async playBirdChirp(): Promise<void> {
-    const ctx = await this.getContext();
-    const now = ctx.currentTime;
-    const vol = 0.06 * this.masterVolume * this.zoomVolume;
-
-    const osc = ctx.createOscillator();
-    osc.type = "sine";
-    // Glide up then down: 800→1200→800
-    osc.frequency.setValueAtTime(800, now);
-    osc.frequency.linearRampToValueAtTime(1200, now + 0.05);
-    osc.frequency.linearRampToValueAtTime(800, now + 0.1);
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(vol, now + 0.01);
-    gain.gain.linearRampToValueAtTime(0, now + 0.1);
-
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.12);
-  }
-
-  private async playCricket(): Promise<void> {
-    const ctx = await this.getContext();
-    const now = ctx.currentTime;
-    const vol = 0.04 * this.masterVolume * this.zoomVolume;
-
-    // 3 short pulses at 4000Hz
-    for (let i = 0; i < 3; i++) {
-      const t = now + i * 0.1;
-      const osc = ctx.createOscillator();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(4000 + Math.random() * 500, t);
-
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0, t);
-      gain.gain.linearRampToValueAtTime(vol, t + 0.005);
-      gain.gain.linearRampToValueAtTime(0, t + 0.02);
-
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(t);
-      osc.stop(t + 0.025);
-    }
-  }
-
-  private async playOwlHoot(): Promise<void> {
-    const ctx = await this.getContext();
-    const now = ctx.currentTime;
-    const vol = 0.05 * this.masterVolume * this.zoomVolume;
-
-    const osc = ctx.createOscillator();
-    osc.type = "sine";
-    // Low sine dipping down: 300→200
-    osc.frequency.setValueAtTime(300, now);
-    osc.frequency.linearRampToValueAtTime(200, now + 0.3);
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(vol, now + 0.02);
-    gain.gain.setValueAtTime(vol, now + 0.2);
-    gain.gain.linearRampToValueAtTime(0, now + 0.35);
-
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.4);
   }
 
   // ---------------------------------------------------------------------------
@@ -548,21 +287,17 @@ class SoundManager {
   }
 
   // ---------------------------------------------------------------------------
-  // Existing event sounds (preserved)
+  // Event sounds
   // ---------------------------------------------------------------------------
 
   /**
    * Descending warning tone — retro "damage / blocked" sound.
-   *
-   * Square wave sliding from E5 (660 Hz) down to A3 (220 Hz) over 250 ms,
-   * with a short noise burst overlay for impact texture.
    */
   async playBlocked(): Promise<void> {
     if (!this.enabled) return;
     const ctx = await this.getContext();
     const now = ctx.currentTime;
 
-    // --- Main descending tone ---
     const osc = ctx.createOscillator();
     osc.type = "square";
     osc.frequency.setValueAtTime(660, now);
@@ -577,7 +312,7 @@ class SoundManager {
     osc.start(now);
     osc.stop(now + 0.25);
 
-    // --- Short noise burst for impact ---
+    // Short noise burst for impact
     const bufferSize = ctx.sampleRate * 0.06;
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = noiseBuffer.getChannelData(0);
@@ -599,8 +334,6 @@ class SoundManager {
 
   /**
    * Ascending victory arpeggio — retro "item get / complete" sound.
-   *
-   * Four notes in quick sequence: C5, E5, G5, C6 (80 ms each, square wave).
    */
   async playComplete(): Promise<void> {
     if (!this.enabled) return;
@@ -631,9 +364,6 @@ class SoundManager {
 
   /**
    * Flat dissonant buzz — retro "wrong / error" sound.
-   *
-   * Two slightly detuned square waves (220 Hz + 233 Hz) creating a beat
-   * frequency, 200 ms duration.
    */
   async playError(): Promise<void> {
     if (!this.enabled) return;
@@ -658,10 +388,9 @@ class SoundManager {
       osc.stop(now + 0.2);
     }
   }
+
   /**
    * Ascending coin pickup — retro "loot collected" sound.
-   *
-   * Three quick triangle-wave notes: C6, E6, G6 (40 ms each).
    */
   async playLoot(): Promise<void> {
     if (!this.enabled) return;
@@ -689,11 +418,9 @@ class SoundManager {
       osc.stop(t + noteDuration + 0.03);
     }
   }
+
   /**
    * Ascending fanfare — retro "level up" sound.
-   *
-   * Six-note ascending sine arpeggio with sustain: C5→E5→G5→C6→E6→G6.
-   * Longer notes (100ms) with overlapping tails for a triumphant feel.
    */
   async playLevelUp(): Promise<void> {
     if (!this.enabled) return;
@@ -738,6 +465,7 @@ class SoundManager {
       osc.stop(chordStart + 0.5);
     }
   }
+
   /**
    * Ascending pentatonic run with shimmer chord — retro "achievement unlocked" sound.
    */

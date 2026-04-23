@@ -18,6 +18,7 @@ type UnknownLogger struct {
 	file *os.File
 	enc  *json.Encoder
 	path string
+	seen map[string]bool
 }
 
 // UnknownEntry is a single logged unknown event.
@@ -50,7 +51,7 @@ func GetUnknownLogger() *UnknownLogger {
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot open unknown events log %s: %v\n", path, err)
-			globalLogger = &UnknownLogger{path: path} // no-op logger
+			globalLogger = &UnknownLogger{path: path, seen: map[string]bool{}} // no-op logger
 			return
 		}
 
@@ -58,20 +59,29 @@ func GetUnknownLogger() *UnknownLogger {
 			file: f,
 			enc:  json.NewEncoder(f),
 			path: path,
+			seen: map[string]bool{},
 		}
 	})
 	return globalLogger
 }
 
-// Log writes an unknown event entry to the log file.
+// Log writes an unknown event entry to the log file. First-occurrence only
+// per (reason, type, tool_name, block_type) signature — repeats are dropped.
 func (ul *UnknownLogger) Log(entry UnknownEntry) {
+	ul.mu.Lock()
+	defer ul.mu.Unlock()
+
+	blockType, _ := entry.RawData["type"].(string)
+	sig := entry.Reason + "|" + entry.Type + "|" + entry.ToolName + "|" + blockType
+	if ul.seen[sig] {
+		return
+	}
+	ul.seen[sig] = true
+
 	if ul.file == nil {
 		return
 	}
 	entry.Timestamp = time.Now().Format(time.RFC3339)
-
-	ul.mu.Lock()
-	defer ul.mu.Unlock()
 	ul.enc.Encode(entry) //nolint: no need to check error on best-effort logging
 }
 

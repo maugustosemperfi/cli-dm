@@ -203,7 +203,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		Role protocol.AgentRole
 	})
 
-	hub := server.NewHub(func() protocol.StateSnapshot {
+	buildSnapshot := func() protocol.StateSnapshot {
 		// Merge PTY agent snapshots with external (watch/hooks) agent snapshots
 		snaps := mgr.AgentSnapshots()
 		externalAgentsMu.RLock()
@@ -230,7 +230,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 			DAG:    taskGraph.Snapshot(),
 			Ts:     protocol.NowMs(),
 		}
-	}, logger)
+	}
+
+	hub := server.NewHub(buildSnapshot, logger)
 
 	// --- Session persistence ---
 	var eventStore *storage.FileEventStore
@@ -292,6 +294,55 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Track watchers for cleanup
 	var watchers []*ingestion.JSONLWatcher
+	var watchersMu sync.Mutex
+
+	// Track JSONL paths already being watched — used by the periodic
+	// rediscovery goroutine to avoid double-watching the same session.
+	watchedPaths := make(map[string]bool)
+	var watchedPathsMu sync.Mutex
+
+	// Counter for agent IDs assigned to sessions discovered after startup
+	// (new terminals opened while cli-dm is already running).
+	lateAgentCounter := 0
+
+	// registerWatcher takes ownership of `w` for cleanup purposes. It appends
+	// w to `watchers` and sets a SetOnStop callback that releases
+	// watchedPaths[path] and the watchers entry once the poll/sweep goroutines
+	// exit — which happens when the watcher auto-completes after 30 min of
+	// idle. Releasing watchedPaths lets the 30s rediscovery ticker re-engage
+	// the session as a fresh late-N agent if the JSONL resumes activity.
+	//
+	// The caller must have already claimed watchedPaths[path] = true. Returns
+	// an idempotent release func to invoke manually if Start fails (goroutine
+	// never ran, so onStop wouldn't fire).
+	registerWatcher := func(path string, w *ingestion.JSONLWatcher) func() {
+		watchersMu.Lock()
+		watchers = append(watchers, w)
+		watchersMu.Unlock()
+
+		var once sync.Once
+		release := func() {
+			once.Do(func() {
+				watchedPathsMu.Lock()
+				delete(watchedPaths, path)
+				watchedPathsMu.Unlock()
+
+				watchersMu.Lock()
+				for i, ww := range watchers {
+					if ww == w {
+						watchers = append(watchers[:i], watchers[i+1:]...)
+						break
+					}
+				}
+				watchersMu.Unlock()
+
+				logger.Info("watcher released", "path", path)
+			})
+		}
+
+		w.SetOnStop(release)
+		return release
+	}
 
 	// Event pipeline: ingestion -> parser -> hub broadcast
 	eventSink := func(ev protocol.Event) {
@@ -512,11 +563,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 					externalAgentsMu.Unlock()
 
 					w := ingestion.NewJSONLWatcher(watchPath, agentID, sharedMapper, eventSink, logger)
+					watchedPaths[watchPath] = true
+					release := registerWatcher(watchPath, w)
 					if err := w.Start(false); err != nil {
 						logger.Error("failed to start watcher", "id", agentID, "error", err)
+						release()
 						return err
 					}
-					watchers = append(watchers, w)
 
 					spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
 						Type:    protocol.TypeAgentSpawn,
@@ -558,11 +611,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 						externalAgentsMu.Unlock()
 
 						w := ingestion.NewJSONLWatcher(sess.Path, subAgentID, sharedMapper, eventSink, logger)
+						watchedPaths[sess.Path] = true
+						release := registerWatcher(sess.Path, w)
 						if err := w.Start(false); err != nil {
 							logger.Error("failed to start watcher", "id", subAgentID, "error", err)
+							release()
 							continue
 						}
-						watchers = append(watchers, w)
 
 						spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
 							Type:    protocol.TypeAgentSpawn,
@@ -629,11 +684,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 					externalAgentsMu.Unlock()
 
 					w := ingestion.NewJSONLWatcher(proj.SessionPath, agentID, sharedMapper, eventSink, logger)
+					watchedPaths[proj.SessionPath] = true
+					release := registerWatcher(proj.SessionPath, w)
 					if err := w.Start(false); err != nil {
 						logger.Error("failed to start watcher", "project", name, "error", err)
+						release()
 						continue
 					}
-					watchers = append(watchers, w)
 
 					spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
 						Type:    protocol.TypeAgentSpawn,
@@ -700,9 +757,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Clean up watchers on exit
+	// Clean up watchers on exit. Copy the slice under lock so release
+	// callbacks (which rewrite `watchers`) can't corrupt iteration.
 	defer func() {
-		for _, w := range watchers {
+		watchersMu.Lock()
+		ws := make([]*ingestion.JSONLWatcher, len(watchers))
+		copy(ws, watchers)
+		watchersMu.Unlock()
+		for _, w := range ws {
 			w.Stop()
 		}
 	}()
@@ -741,6 +803,113 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cancel()
 		srv.Shutdown(context.Background())
 	}()
+
+	// Periodic session rediscovery — picks up JSONL files created after
+	// startup (e.g. new Claude Code sessions opened in other terminals).
+	if fileCfg != nil {
+		spawnLateWatcher := func(path, name string, role protocol.AgentRole) {
+			watchedPathsMu.Lock()
+			if watchedPaths[path] {
+				watchedPathsMu.Unlock()
+				return
+			}
+			watchedPaths[path] = true
+			lateAgentCounter++
+			counter := lateAgentCounter
+			watchedPathsMu.Unlock()
+
+			agentID := fmt.Sprintf("late-%d", counter)
+			taskID := fmt.Sprintf("late-task-%d", counter)
+			taskGraph.AddNode(taskID, name, agentID)
+
+			externalAgentsMu.Lock()
+			externalAgents[agentID] = struct {
+				Name string
+				Role protocol.AgentRole
+			}{name, role}
+			externalAgentsMu.Unlock()
+
+			w := ingestion.NewJSONLWatcher(path, agentID, sharedMapper, eventSink, logger)
+			// watchedPaths[path] was already reserved above under the mutex.
+			release := registerWatcher(path, w)
+			if err := w.Start(false); err != nil {
+				logger.Error("failed to start late watcher", "path", path, "error", err)
+				release()
+				return
+			}
+
+			spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
+				Type:    protocol.TypeAgentSpawn,
+				AgentID: agentID,
+				Name:    name,
+				Role:    role,
+				TaskID:  taskID,
+				Ts:      protocol.NowMs(),
+			})
+			eventSink(spawnEv)
+
+			// Broadcast full state.snapshot so the frontend picks up the new
+			// DAG node and renders a building/house + connecting roads for it.
+			// AgentSpawn alone does not mutate the DAG on the client side.
+			if snapEv, err := protocol.NewEvent(buildSnapshot()); err == nil {
+				hub.Broadcast(snapEv)
+			}
+
+			logger.Info("discovered new session", "agent", agentID, "path", path, "name", name)
+		}
+
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// Rediscovery uses StaleIdleThreshold (30min) — tighter than
+					// the startup filter — so a JSONL whose watcher was just
+					// auto-completed at 30min idle doesn't immediately re-qualify
+					// and loop. If the user resumes the session, its mtime jumps
+					// forward and this filter will include it again.
+					rediscoverMaxAge := ingestion.StaleIdleThreshold
+
+					// Re-check each "watch" agent with Project set
+					for i, ac := range fileCfg.Agents {
+						if strings.ToLower(ac.Source) != "watch" || ac.Project == "" {
+							continue
+						}
+						sessions, err := ingestion.DiscoverActiveSessions(expandHome(ac.Project), rediscoverMaxAge)
+						if err != nil {
+							continue
+						}
+						baseName := ac.Name
+						if baseName == "" {
+							baseName = defaultRoleNames[defaultRoles[i%len(defaultRoles)]]
+						}
+						baseRole := protocol.AgentRole(strings.ToLower(ac.Role))
+						if ac.Role == "" {
+							baseRole = defaultRoles[i%len(defaultRoles)]
+						}
+						for _, sess := range sessions {
+							spawnLateWatcher(sess.Path, baseName, baseRole)
+						}
+					}
+
+					// Re-scan watch_dir using the same tight filter.
+					if fileCfg.WatchDir != "" {
+						projects, err := ingestion.DiscoverProjectsInDir(expandHome(fileCfg.WatchDir), rediscoverMaxAge)
+						if err != nil {
+							continue
+						}
+						for j, proj := range projects {
+							role := defaultRoles[j%len(defaultRoles)]
+							spawnLateWatcher(proj.SessionPath, proj.ProjectName, role)
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	agentCount := len(agentCmds)
 	if fileCfg != nil {

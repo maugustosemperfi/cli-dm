@@ -72,6 +72,30 @@ func (m *Mapper) GetState(agentID string) *parser.AgentState {
 	return s
 }
 
+// PruneAgent removes all tracking state for a completed agent so long-running
+// cli-dm sessions don't accumulate unbounded per-agent maps. Safe to call for
+// agents that were never seen.
+//
+// Also drops any subagent entries whose IDs are derived from this agent
+// (subID = parentID + ":" + name), since a completed parent means its
+// subagents are implicitly done too.
+func (m *Mapper) PruneAgent(agentID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.states, agentID)
+	subPrefix := agentID + ":"
+	for toolUseID, subID := range m.activeSubagents {
+		if subID == agentID || strings.HasPrefix(subID, subPrefix) {
+			delete(m.activeSubagents, toolUseID)
+		}
+	}
+	for subID := range m.spawnedSubs {
+		if subID == agentID || strings.HasPrefix(subID, subPrefix) {
+			delete(m.spawnedSubs, subID)
+		}
+	}
+}
+
 // Map converts a single ToolEvent into zero or more protocol.Events.
 func (m *Mapper) Map(te ToolEvent) []protocol.Event {
 	switch te.Kind {
@@ -167,6 +191,9 @@ func (m *Mapper) handleToolEnd(te ToolEvent) []protocol.Event {
 				events = append(events, completeEv)
 			}
 			delete(m.activeSubagents, te.ToolUseID)
+			// Drop the subagent's per-agent state so it doesn't live on forever.
+			// Holds m.mu internally; safe to call here (we don't hold the lock).
+			m.PruneAgent(subID)
 		}
 	}
 
@@ -201,6 +228,7 @@ func (m *Mapper) handleSessionLife(te ToolEvent) []protocol.Event {
 	if err != nil {
 		return nil
 	}
+	m.PruneAgent(te.AgentID)
 	return []protocol.Event{ev}
 }
 

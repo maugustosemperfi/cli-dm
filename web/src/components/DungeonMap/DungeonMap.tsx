@@ -26,6 +26,26 @@ import { soundManager } from "../../audio/SoundManager";
 import { SpawnLink } from "./SpawnLink";
 import { LayerControls } from "./LayerControls";
 
+// Render layers for the `world` container. Higher = drawn on top.
+// The world sets sortableChildren=true, so these stable zIndex values decide
+// render order regardless of insertion time (fixes agents disappearing behind
+// later-discovered rooms).
+const Z = {
+  grid: 0,
+  fog: 1,
+  corridor: 5,
+  torch: 6,
+  room: 20,
+  creature: 25,
+  pet: 30,
+  door: 35,
+  boss: 36,
+  agent: 40,
+  loot: 45,
+  banner: 50,
+  dayNight: 100,
+} as const;
+
 export function DungeonMap() {
   const containerRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -89,7 +109,6 @@ export function DungeonMap() {
 
       const w = container.clientWidth;
       const h = container.clientHeight;
-      console.log(`[CLI_DM] Container ready: ${w}x${h}`);
 
       try {
         app = new Application();
@@ -122,8 +141,11 @@ export function DungeonMap() {
         bgLayer.eventMode = "static";
         app.stage.addChild(bgLayer);
 
-        // World container
+        // World container — sortableChildren makes Pixi sort by zIndex each
+        // render, so insertion order no longer dictates back-to-front. Prevents
+        // late-discovered rooms from covering already-rendered agent sprites.
         const world = new Container();
+        world.sortableChildren = true;
         app.stage.addChild(world);
         worldRef.current = world;
 
@@ -137,10 +159,12 @@ export function DungeonMap() {
         for (let y = -gs; y <= gs; y += spacing) {
           grid.moveTo(-gs, y).lineTo(gs, y).stroke({ color: THEME.gridDot, width: 0.5, alpha: 0.12 });
         }
+        grid.zIndex = Z.grid;
         world.addChild(grid);
 
         // Fog of war layer (above grid, below rooms/corridors)
         const fog = new FogOfWar();
+        fog.zIndex = Z.fog;
         world.addChild(fog);
         fogRef.current = fog;
 
@@ -160,6 +184,7 @@ export function DungeonMap() {
 
         // Day/Night cycle overlay (topmost world layer)
         const dayNight = new DayNightCycle(w, h);
+        dayNight.zIndex = Z.dayNight;
         world.addChild(dayNight);
         dayNightRef.current = dayNight;
 
@@ -300,14 +325,9 @@ export function DungeonMap() {
 
           camera.tick();
 
-          // Zoom-to-volume: feed camera zoom level to sound manager
+          // Zoom-to-volume: feed camera zoom level to sound manager (SFX only)
           const vp = camera.getViewport();
           soundManager.setZoomVolume(vp.scale);
-
-          // Day/night: feed to sound manager
-          if (dayNightRef.current) {
-            soundManager.setDayNight(dayNightRef.current.isNight());
-          }
 
           const followPositions: Array<{ x: number; y: number }> = [];
           for (const sprite of spritesRef.current.values()) {
@@ -317,10 +337,7 @@ export function DungeonMap() {
           }
           camera.autoFollow(followPositions);
         });
-
-        console.log("[CLI_DM] PixiJS running");
       } catch (err) {
-        console.error("[CLI_DM] PixiJS init failed:", err);
         setError(String(err));
       }
     }
@@ -402,6 +419,7 @@ export function DungeonMap() {
             }));
           });
           rooms.set(ln.nodeId, room);
+          room.zIndex = Z.room;
           world.addChild(room);
           // Growth animation for new rooms
           if (ln.isNew) {
@@ -465,6 +483,7 @@ export function DungeonMap() {
         corridorMap.set(`${edge.to.nodeId}:${edge.from.nodeId}`, c);
         connectedPairs.add(`${edge.from.nodeId}:${edge.to.nodeId}`);
         connectedPairs.add(`${edge.to.nodeId}:${edge.from.nodeId}`);
+        c.zIndex = Z.corridor;
         world.addChildAt(c, 1);
       }
 
@@ -486,6 +505,7 @@ export function DungeonMap() {
           corridorMap.set(`${neighbor.nodeId}:${ln.nodeId}`, c);
           connectedPairs.add(key);
           connectedPairs.add(`${neighbor.nodeId}:${ln.nodeId}`);
+          c.zIndex = Z.corridor;
           world.addChildAt(c, 1);
         }
       }
@@ -502,6 +522,8 @@ export function DungeonMap() {
           if (pt && nm) {
             const t1 = new TorchLight(pt[0] + nm[0] * 22, pt[1] + nm[1] * 22, false);
             const t2 = new TorchLight(pt[0] - nm[0] * 22, pt[1] - nm[1] * 22, true);
+            t1.zIndex = Z.torch;
+            t2.zIndex = Z.torch;
             torchesRef.current.push(t1, t2);
             world.addChildAt(t1, 2);
             world.addChildAt(t2, 2);
@@ -637,6 +659,7 @@ export function DungeonMap() {
             { x: cx, y: cy },
             { x: cx + (Math.random() - 0.5) * 60, y: cy + (Math.random() - 0.5) * 40 }
           );
+          creature.zIndex = Z.creature;
           creaturesRef.current.push(creature);
           world.addChildAt(creature, 2);
         }
@@ -652,12 +675,14 @@ export function DungeonMap() {
         let sp = sprites.get(agent.agentId);
         if (!sp) {
           sp = new AgentSprite(agent.agentId, agent.role);
+          sp.zIndex = Z.agent;
           sp.on("pointertap", () => selectAgent(agent.agentId));
           sprites.set(agent.agentId, sp);
           world.addChild(sp);
 
           // Create companion pet for this agent
           const pet = new CompanionPet(petTypeForRole(agent.role));
+          pet.zIndex = Z.pet;
           petsRef.current.set(agent.agentId, pet);
           world.addChild(pet);
         }
@@ -683,6 +708,7 @@ export function DungeonMap() {
         if (agent.isComplete && !completedAgentsRef.current.has(agent.agentId)) {
           completedAgentsRef.current.set(agent.agentId, now);
           const loot = new LootEffect(sp.position.x, sp.position.y, sp.role);
+          loot.zIndex = Z.loot;
           world.addChild(loot);
           lootEffectsRef.current.push(loot);
           soundManager.playLoot();
@@ -713,6 +739,7 @@ export function DungeonMap() {
           if (curAction === "test" && !bossesRef.current.has(agent.agentId)) {
             const boss = new BossEncounter(sp.position.x + 50, sp.position.y, BOSS_DATA_TO_VISUAL['test_hydra']);
             boss.setDataType('test_hydra');
+            boss.zIndex = Z.boss;
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
             spawnCreaturesNear(sp.position.x, sp.position.y, 2);
@@ -723,6 +750,7 @@ export function DungeonMap() {
           if (curAction === "build" && !bossesRef.current.has(agent.agentId)) {
             const boss = new BossEncounter(sp.position.x + 50, sp.position.y, BOSS_DATA_TO_VISUAL['forge_golem']);
             boss.setDataType('forge_golem');
+            boss.zIndex = Z.boss;
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
             creatureSpawnCooldownRef.current.set(agent.agentId, now);
@@ -770,6 +798,7 @@ export function DungeonMap() {
           if (!bossesRef.current.has(agent.agentId)) {
             const boss = new BossEncounter(sp.position.x + 50, sp.position.y, bossType);
             boss.setDataType('gate_keeper');
+            boss.zIndex = Z.boss;
             bossesRef.current.set(agent.agentId, boss);
             world.addChild(boss);
           }
@@ -783,6 +812,7 @@ export function DungeonMap() {
               const midY = (incomingEdge.from.y + incomingEdge.to.y) / 2;
               const angle = Math.atan2(incomingEdge.to.y - incomingEdge.from.y, incomingEdge.to.x - incomingEdge.from.x);
               const door = new BlockedDoor(midX, midY, angle);
+              door.zIndex = Z.door;
               doorsRef.current.set(agent.agentId, door);
               world.addChild(door);
             }
@@ -800,6 +830,7 @@ export function DungeonMap() {
         // Error → spawn boss if none active
         if (curAction === "error" && !bossesRef.current.has(agent.agentId) && canSpawn) {
           const boss = new BossEncounter(sp.position.x + 50, sp.position.y, "dragon");
+          boss.zIndex = Z.boss;
           bossesRef.current.set(agent.agentId, boss);
           world.addChild(boss);
           spawnCreaturesNear(sp.position.x, sp.position.y, 3);
@@ -826,6 +857,7 @@ export function DungeonMap() {
               const angle = Math.atan2(toLn.y - fromLn.y, toLn.x - fromLn.x);
               const dirName = agent.lastDiscoveredPath ?? "unknown";
               const door = new DiscoveryDoor(midX, midY, angle, dirName);
+              door.zIndex = Z.door;
 
               let agentDoors = discoveryDoorsRef.current.get(agent.agentId);
               if (!agentDoors) {
@@ -852,6 +884,7 @@ export function DungeonMap() {
           if (condition && !earned.has(type)) {
             earned.add(type);
             const banner = new AchievementBanner(sp.position.x, sp.position.y, type);
+            banner.zIndex = Z.banner;
             bannersRef.current.push(banner);
             world.addChild(banner);
             soundManager.playAchievement();
@@ -967,6 +1000,7 @@ export function DungeonMap() {
                       sp.position.x, sp.position.y,
                       agent.role
                     );
+                    link.zIndex = Z.corridor;
                     spawnLinksRef.current.set(agent.agentId, link);
                     world.addChildAt(link, 1); // corridor layer
                   }
@@ -1005,11 +1039,6 @@ export function DungeonMap() {
 
   useEffect(() => {
     syncScene(dag, agents);
-    // Debug: log agent states to console
-    const summary = [...agents.entries()].map(([_id, a]) =>
-      `${a.name.padEnd(20)} | action=${a.currentAction.padEnd(10)} | lastActive=${a.lastActiveTs} | complete=${a.isComplete}`
-    ).join('\n');
-    if (agents.size > 0) console.log('[CLI_DM] Agent states:\n' + summary);
   }, [dag, agents, syncScene]);
 
   const handleMinimapClick = useCallback(

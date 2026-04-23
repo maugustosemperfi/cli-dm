@@ -58,6 +58,11 @@ type JSONLWatcher struct {
 
 	// Stale detection: 0=fresh, 1=idle emitted (5min), 2=complete emitted (30min)
 	staleEmitted int
+
+	// onStop is invoked exactly once after the poll/sweep goroutines exit, so
+	// the owner (main.go) can release watchedPaths/watchers entries and let the
+	// rediscovery ticker re-engage the session if its JSONL resumes activity.
+	onStop func()
 }
 
 // NewJSONLWatcher creates a watcher for the given JSONL file path.
@@ -83,8 +88,9 @@ const BackfillBytes int64 = 64 * 1024
 
 // Stale session thresholds — skip backfill or auto-complete based on file age.
 const (
-	StaleBackfillThreshold  = 10 * time.Minute  // skip backfill for files idle > 10min
-	StaleCompleteThreshold  = 2 * time.Hour      // auto-complete for files idle > 2h
+	StaleBackfillThreshold = 10 * time.Minute // skip backfill for files idle > 10min
+	StaleIdleThreshold     = 30 * time.Minute // mid-run: emit AgentComplete + stop the watcher
+	StaleCompleteThreshold = 2 * time.Hour    // startup: file already too old to replay — auto-complete on arrival
 )
 
 // Start begins watching the file. If catchUp is true, it reads from the
@@ -142,6 +148,16 @@ func (w *JSONLWatcher) Start(catchUp bool) error {
 			staleDur.Truncate(time.Minute).String() + ") —\033[0m\r\n")
 		w.logger.Info("auto-completed stale session", "path", w.filePath,
 			"agent", w.agentID, "idle", staleDur.Truncate(time.Minute))
+		// Prune mapper state for this agent and any subagents we spawned.
+		w.mp.PruneAgent(w.agentID)
+		for aid := range w.inferStates {
+			if aid != w.agentID {
+				w.mp.PruneAgent(aid)
+			}
+			delete(w.inferStates, aid)
+		}
+		// Session is dead on arrival — stop polling so we don't leak goroutines.
+		w.Stop()
 	}
 
 	return nil
@@ -154,11 +170,23 @@ func (w *JSONLWatcher) Stop() {
 	})
 }
 
+// SetOnStop registers a callback to invoke once the poll/sweep goroutines
+// have exited. Must be set before Start so the callback is visible to the
+// goroutine; it's called at most once from watchLoop's defer.
+func (w *JSONLWatcher) SetOnStop(fn func()) {
+	w.onStop = fn
+}
+
 func (w *JSONLWatcher) watchLoop() {
 	pollTicker := time.NewTicker(200 * time.Millisecond)
 	sweepTicker := time.NewTicker(2 * time.Minute)
 	defer pollTicker.Stop()
 	defer sweepTicker.Stop()
+	defer func() {
+		if w.onStop != nil {
+			w.onStop()
+		}
+	}()
 
 	for {
 		select {
@@ -183,7 +211,7 @@ func (w *JSONLWatcher) sweepStale() {
 	staleDur := time.Since(info.ModTime())
 
 	// 30 min: agent leaves the dungeon
-	if staleDur > 30*time.Minute {
+	if staleDur > StaleIdleThreshold {
 		if w.staleEmitted == 2 {
 			return
 		}
@@ -199,6 +227,17 @@ func (w *JSONLWatcher) sweepStale() {
 		w.staleEmitted = 2
 		w.emitRawOutput("\033[90m— session ended (no activity for 30 min) —\033[0m\r\n")
 		w.logger.Info("session ended", "path", w.filePath, "agent", w.agentID)
+		// Prune mapper state for this agent and any subagents we spawned.
+		w.mp.PruneAgent(w.agentID)
+		for aid := range w.inferStates {
+			if aid != w.agentID {
+				w.mp.PruneAgent(aid)
+			}
+			delete(w.inferStates, aid)
+		}
+		// Release the poll + sweep goroutines — nothing more to observe on a
+		// 30-min-dead JSONL. If the session is resumed later, restart cli-dm.
+		w.Stop()
 		return
 	}
 
@@ -329,9 +368,11 @@ func (w *JSONLWatcher) poll() {
 			var raw map[string]any
 			if json.Unmarshal(line, &raw) == nil {
 				msgType, _ := raw["type"].(string)
-				// Only log non-trivially-skipped types
+				// Only log truly unknown types — skip ones the mapper already handles
+				// or explicitly treats as non-actionable.
 				if msgType != "" && msgType != "permission-mode" && msgType != "file-history-snapshot" &&
-					msgType != "last-prompt" && msgType != "custom-title" && msgType != "agent-name" && msgType != "attachment" {
+					msgType != "last-prompt" && msgType != "custom-title" && msgType != "agent-name" && msgType != "attachment" &&
+					msgType != "queue-operation" && msgType != "system" && msgType != "user" && msgType != "assistant" {
 					mapper.GetUnknownLogger().Log(mapper.UnknownEntry{
 						Reason:  "no_events",
 						Type:    msgType,

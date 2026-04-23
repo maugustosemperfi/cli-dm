@@ -132,6 +132,9 @@ export interface AgentState extends AgentSnapshot {
   totalTests: number;
   // Agent class from behavior
   actionProfile: ActionProfile;
+  // Timestamp at which `isComplete` became true — used by the retention sweep
+  // to evict long-dead agents from the scene without resetting RPG stats.
+  completedAt?: number;
 }
 
 export interface EventLogEntry {
@@ -452,10 +455,6 @@ export const useGameState = create<GameState>((set, get) => ({
   },
 
   handleEvent: (event) => {
-    // Debug: log non-noisy events
-    if (event.type !== "raw.stdout" && event.type !== "raw.stderr") {
-      console.log(`[CLI_DM] event: ${event.type}`, event);
-    }
     const state = get();
 
     const pushLog = (entry: Omit<EventLogEntry, "ts">) => {
@@ -514,6 +513,7 @@ export const useGameState = create<GameState>((set, get) => ({
             totalBuilds: existing?.totalBuilds ?? 0,
             totalTests: existing?.totalTests ?? 0,
             actionProfile: existing?.actionProfile ?? { recentActions: [], classType: 'paladin', classChangedAt: 0 },
+            completedAt: existing?.completedAt,
           });
         }
         set({ agents, dag: event.dag });
@@ -548,8 +548,6 @@ export const useGameState = create<GameState>((set, get) => ({
           actionProfile: { recentActions: [], classType: 'paladin', classChangedAt: 0 },
         });
         set({ agents });
-        // Start ambient soundscape on first agent spawn
-        soundManager.startAmbient();
         pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
         pushTranscript({ agentId: event.agentId, agentName: event.name, agentRole: event.role, kind: "spawn", message: `joined the dungeon as ${event.role}` });
         break;
@@ -564,6 +562,7 @@ export const useGameState = create<GameState>((set, get) => ({
             isComplete: true,
             exitCode: event.exitCode,
             currentAction: "idle",
+            completedAt: event.ts ?? Date.now(),
           });
           set({ agents });
           // Close any open timeline segment
@@ -644,20 +643,8 @@ export const useGameState = create<GameState>((set, get) => ({
         if (agent) {
           const prevAction = agent.currentAction;
 
-          // Ambient soundscape: play action sound + update activity level
+          // One-shot SFX for the action (no ambient layering).
           soundManager.playActionSound(event.action);
-          {
-            let activeCount = 0;
-            for (const a of state.agents.values()) {
-              if (a.currentAction !== "idle" && !a.isComplete) activeCount++;
-            }
-            soundManager.setActivityLevel(Math.min(1, activeCount / 5));
-            let hasErrors = false;
-            for (const a of state.agents.values()) {
-              if ((a.errorCount ?? 0) > 0 && !a.isComplete) { hasErrors = true; break; }
-            }
-            soundManager.setErrorAtmosphere(hasErrors);
-          }
 
           // Discovery tracking — detect new directories on read/edit
           let { discoveredPaths, discoveredPathCount, lastDiscoveredPath } = agent;
@@ -1038,3 +1025,31 @@ export const useGameState = create<GameState>((set, get) => ({
     }
   },
 }));
+
+// --- Completed-agent retention sweep ---
+// Agents marked isComplete sit in state.agents forever by default, which
+// over a long-running session accumulates dead sprites and bloats memory.
+// Every minute, evict agents that completed more than 30 minutes ago.
+// RPG stats persist separately in localStorage via savePersistedStats, so
+// stats are preserved even though the live-session entry is removed.
+const COMPLETED_RETENTION_MS = 30 * 60_000;
+const RETENTION_SWEEP_INTERVAL_MS = 60_000;
+
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    const { agents } = useGameState.getState();
+    const now = Date.now();
+    let evicted = 0;
+    let next: Map<string, AgentState> | null = null;
+    for (const [id, a] of agents) {
+      if (a.isComplete && a.completedAt && now - a.completedAt > COMPLETED_RETENTION_MS) {
+        if (!next) next = new Map(agents);
+        next.delete(id);
+        evicted++;
+      }
+    }
+    if (next) {
+      useGameState.setState({ agents: next });
+    }
+  }, RETENTION_SWEEP_INTERVAL_MS);
+}

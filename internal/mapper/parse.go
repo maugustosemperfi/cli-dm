@@ -294,20 +294,80 @@ func parseSystem(raw map[string]any, agentID string) ([]ToolEvent, error) {
 	}
 }
 
+// ModelPricing holds per-million-token USD rates for a Claude model.
+// Cache write uses the 5-min TTL multiplier (1.25× input), which is the
+// common case; the JSONL does not distinguish 5-min vs 1-hour cache writes.
+type ModelPricing struct {
+	Input      float64
+	Output     float64
+	CacheRead  float64 // 0.1× input
+	CacheWrite float64 // 1.25× input (5-min cache)
+}
+
+// modelPricing: per-million-token rates sourced from Anthropic's pricing docs.
+// Keys are matched as prefixes against the JSONL `model` field, so
+// dated variants like "claude-opus-4-7-20260201" resolve to "claude-opus-4-7".
+var modelPricing = map[string]ModelPricing{
+	// Opus 4.5 / 4.6 / 4.7 — current flagship rate card
+	"claude-opus-4-7":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	"claude-opus-4-6":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	"claude-opus-4-5":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	// Opus 4 / 4.1 — legacy higher pricing
+	"claude-opus-4-1": {Input: 15.0, Output: 75.0, CacheRead: 1.50, CacheWrite: 18.75},
+	"claude-opus-4":   {Input: 15.0, Output: 75.0, CacheRead: 1.50, CacheWrite: 18.75},
+	// Sonnet 4 / 4.5 / 4.6
+	"claude-sonnet-4-6": {Input: 3.0, Output: 15.0, CacheRead: 0.30, CacheWrite: 3.75},
+	"claude-sonnet-4-5": {Input: 3.0, Output: 15.0, CacheRead: 0.30, CacheWrite: 3.75},
+	"claude-sonnet-4":   {Input: 3.0, Output: 15.0, CacheRead: 0.30, CacheWrite: 3.75},
+	// Haiku 4.5
+	"claude-haiku-4-5": {Input: 1.0, Output: 5.0, CacheRead: 0.10, CacheWrite: 1.25},
+	"claude-haiku-3-5": {Input: 0.80, Output: 4.0, CacheRead: 0.08, CacheWrite: 1.0},
+}
+
+// defaultPricing is used when the JSONL entry omits `model` or the ID is
+// unrecognized. Opus 4.7 is the current flagship default.
+var defaultPricing = modelPricing["claude-opus-4-7"]
+
+// pricingForModel returns the rate card for a model ID. Matches longest
+// prefix first so dated variants ("claude-opus-4-7-20260201") resolve to
+// the right base model before any shorter prefix ("claude-opus-4") would.
+func pricingForModel(model string) ModelPricing {
+	if model == "" {
+		return defaultPricing
+	}
+	if p, ok := modelPricing[model]; ok {
+		return p
+	}
+	var bestKey string
+	for k := range modelPricing {
+		if strings.HasPrefix(model, k) && len(k) > len(bestKey) {
+			bestKey = k
+		}
+	}
+	if bestKey != "" {
+		return modelPricing[bestKey]
+	}
+	return defaultPricing
+}
+
 // ExtractTokensFromMessage extracts usage data from an assistant message.
 // Returns (inputTokens, outputTokens, estimatedCostUSD, ok).
 //
-// Claude Code JSONL does NOT include costUSD — we estimate from token counts
-// using Opus 4.6 pricing: $15/M input, $75/M output, $3.75/M cache read,
-// $18.75/M cache write.
+// Claude Code JSONL does not include costUSD, so we estimate from token
+// counts using the rate card for the message's `model` field (falling back
+// to Opus 4.7 pricing when missing).
 func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) {
-	// Check for usage field in the message or top-level
 	var usage map[string]any
+	var modelID string
 	if msg, _ := raw["message"].(map[string]any); msg != nil {
 		usage, _ = msg["usage"].(map[string]any)
+		modelID, _ = msg["model"].(string)
 	}
 	if usage == nil {
 		usage, _ = raw["usage"].(map[string]any)
+	}
+	if modelID == "" {
+		modelID, _ = raw["model"].(string)
 	}
 	if usage == nil {
 		return 0, 0, 0, false
@@ -318,22 +378,17 @@ func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) 
 	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
 	cacheWrite, _ := usage["cache_creation_input_tokens"].(float64)
 
-	// Estimate cost from token counts (Opus 4 pricing per million tokens)
-	const (
-		inputPricePerM      = 15.0
-		outputPricePerM     = 75.0
-		cacheReadPricePerM  = 3.75
-		cacheWritePricePerM = 18.75
-	)
+	p := pricingForModel(modelID)
+
 	// Non-cached input = total input minus cache hits
 	plainInput := input - cacheRead
 	if plainInput < 0 {
 		plainInput = 0
 	}
-	cost := (plainInput * inputPricePerM / 1_000_000) +
-		(output * outputPricePerM / 1_000_000) +
-		(cacheRead * cacheReadPricePerM / 1_000_000) +
-		(cacheWrite * cacheWritePricePerM / 1_000_000)
+	cost := (plainInput * p.Input / 1_000_000) +
+		(output * p.Output / 1_000_000) +
+		(cacheRead * p.CacheRead / 1_000_000) +
+		(cacheWrite * p.CacheWrite / 1_000_000)
 
 	return int64(input), int64(output), cost, input > 0 || output > 0
 }

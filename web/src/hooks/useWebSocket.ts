@@ -23,17 +23,14 @@ export function useWebSocket({ url, onRawOutput }: UseWebSocketOptions) {
 
     ws.onopen = () => {
       setConnected(true);
-      console.log("[CLI_DM] WebSocket connected");
     };
 
     ws.onclose = () => {
       setConnected(false);
-      console.log("[CLI_DM] WebSocket disconnected, reconnecting...");
       reconnectTimer.current = setTimeout(connect, WS_RECONNECT_DELAY);
     };
 
-    ws.onerror = (err) => {
-      console.error("[CLI_DM] WebSocket error:", err);
+    ws.onerror = () => {
       ws.close();
     };
 
@@ -54,8 +51,7 @@ export function useWebSocket({ url, onRawOutput }: UseWebSocketOptions) {
 
         // All events go through the global state handler
         handleEvent(event);
-      } catch (err) {
-        console.warn("[CLI_DM] Failed to parse event:", err);
+      } catch {
       }
     };
   }, [url, handleEvent, setConnected, onRawOutput]);

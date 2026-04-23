@@ -196,11 +196,10 @@ export function QuestLog() {
 
 function VolumeControls() {
   const [masterVol, setMasterVol] = useState(soundManager.getMasterVolume());
-  const [ambientOn, setAmbientOn] = useState(soundManager.isAmbientEnabled());
 
   return (
     <div style={{ fontSize: 12, color: "#3e2723" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <label style={{ width: 60 }}>Volume</label>
         <input
           type="range"
@@ -215,28 +214,6 @@ function VolumeControls() {
           style={{ flex: 1, accentColor: "#8b6914" }}
         />
         <span style={{ width: 30, textAlign: "right" }}>{Math.round(masterVol * 100)}%</span>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <label style={{ width: 60 }}>Ambient</label>
-        <button
-          onClick={() => {
-            const next = !ambientOn;
-            setAmbientOn(next);
-            soundManager.setAmbientEnabled(next);
-          }}
-          style={{
-            background: ambientOn ? "#5c8a3e" : "#8b5b5b",
-            color: "#f4e8c1",
-            border: "1px solid #8b6914",
-            borderRadius: 4,
-            padding: "2px 10px",
-            cursor: "pointer",
-            fontSize: 11,
-            fontFamily: "inherit",
-          }}
-        >
-          {ambientOn ? "ON" : "OFF"}
-        </button>
       </div>
     </div>
   );
