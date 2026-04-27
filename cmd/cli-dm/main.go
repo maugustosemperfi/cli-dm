@@ -312,10 +312,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// idle. Releasing watchedPaths lets the 30s rediscovery ticker re-engage
 	// the session as a fresh late-N agent if the JSONL resumes activity.
 	//
+	// extraCleanup (optional) is called after path/watcher cleanup — use it to
+	// remove the agent from externalAgents and its DAG node from taskGraph.
+	//
 	// The caller must have already claimed watchedPaths[path] = true. Returns
 	// an idempotent release func to invoke manually if Start fails (goroutine
 	// never ran, so onStop wouldn't fire).
-	registerWatcher := func(path string, w *ingestion.JSONLWatcher) func() {
+	registerWatcher := func(path string, w *ingestion.JSONLWatcher, extraCleanup func()) func() {
 		watchersMu.Lock()
 		watchers = append(watchers, w)
 		watchersMu.Unlock()
@@ -336,12 +339,31 @@ func runServer(cmd *cobra.Command, args []string) error {
 				}
 				watchersMu.Unlock()
 
+				if extraCleanup != nil {
+					extraCleanup()
+				}
+
 				logger.Info("watcher released", "path", path)
 			})
 		}
 
 		w.SetOnStop(release)
 		return release
+	}
+
+	// makeWatcherCleanup returns a closure that removes the given agent from
+	// externalAgents, drops its DAG node, then broadcasts a fresh state.snapshot
+	// so connected clients immediately see the building disappear.
+	makeWatcherCleanup := func(agentID, taskID string) func() {
+		return func() {
+			externalAgentsMu.Lock()
+			delete(externalAgents, agentID)
+			externalAgentsMu.Unlock()
+			taskGraph.RemoveNode(taskID)
+			if snapEv, err := protocol.NewEvent(buildSnapshot()); err == nil {
+				hub.Broadcast(snapEv)
+			}
+		}
 	}
 
 	// Event pipeline: ingestion -> parser -> hub broadcast
@@ -564,7 +586,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 					w := ingestion.NewJSONLWatcher(watchPath, agentID, sharedMapper, eventSink, logger)
 					watchedPaths[watchPath] = true
-					release := registerWatcher(watchPath, w)
+					release := registerWatcher(watchPath, w, makeWatcherCleanup(agentID, taskID))
 					if err := w.Start(false); err != nil {
 						logger.Error("failed to start watcher", "id", agentID, "error", err)
 						release()
@@ -612,7 +634,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 						w := ingestion.NewJSONLWatcher(sess.Path, subAgentID, sharedMapper, eventSink, logger)
 						watchedPaths[sess.Path] = true
-						release := registerWatcher(sess.Path, w)
+						release := registerWatcher(sess.Path, w, makeWatcherCleanup(subAgentID, subTaskID))
 						if err := w.Start(false); err != nil {
 							logger.Error("failed to start watcher", "id", subAgentID, "error", err)
 							release()
@@ -685,7 +707,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 					w := ingestion.NewJSONLWatcher(proj.SessionPath, agentID, sharedMapper, eventSink, logger)
 					watchedPaths[proj.SessionPath] = true
-					release := registerWatcher(proj.SessionPath, w)
+					release := registerWatcher(proj.SessionPath, w, makeWatcherCleanup(agentID, taskID))
 					if err := w.Start(false); err != nil {
 						logger.Error("failed to start watcher", "project", name, "error", err)
 						release()
@@ -831,7 +853,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 			w := ingestion.NewJSONLWatcher(path, agentID, sharedMapper, eventSink, logger)
 			// watchedPaths[path] was already reserved above under the mutex.
-			release := registerWatcher(path, w)
+			release := registerWatcher(path, w, makeWatcherCleanup(agentID, taskID))
 			if err := w.Start(false); err != nil {
 				logger.Error("failed to start late watcher", "path", path, "error", err)
 				release()

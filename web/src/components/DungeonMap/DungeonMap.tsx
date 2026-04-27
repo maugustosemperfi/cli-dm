@@ -73,6 +73,7 @@ export function DungeonMap() {
   const creatureSpawnCooldownRef = useRef(new Map<string, number>()); // agentId → timestamp
   const spawnLinksRef = useRef(new Map<string, SpawnLink>());
   const prevNodeIdsRef = useRef<Set<string> | null>(null);
+  const prevTopoKeyRef = useRef<string>("");
   const [error, setError] = useState<string | null>(null);
 
   const dag = useGameState((s) => s.dag);
@@ -384,6 +385,12 @@ export function DungeonMap() {
 
       const layout = computeLayout(dag, nodeWeights, prevNodeIdsRef.current ?? undefined);
 
+      // Topology fingerprint: rebuild corridors/torches only when nodes or edges change
+      const topoKey = dag.nodes.map((n) => n.nodeId).sort().join(",") + "|" +
+        dag.edges.map((e) => `${e.from}>${e.to}`).sort().join(",");
+      const topoChanged = topoKey !== prevTopoKeyRef.current;
+      if (topoChanged) prevTopoKeyRef.current = topoKey;
+
       // Update prevNodeIds for next frame's new-node detection
       const currentNodeIds = new Set<string>();
       for (const ln of layout.nodes) currentNodeIds.add(ln.nodeId);
@@ -466,68 +473,81 @@ export function DungeonMap() {
         if (!seen.has(id)) { world.removeChild(r); r.destroy(); rooms.delete(id); }
       }
 
-      // Corridors — recreate (cheap)
-      for (const c of corridorsRef.current) { world.removeChild(c); c.destroy(); }
-      corridorsRef.current = [];
       const corridorMap = new Map<string, Corridor>(); // "from:to" → corridor
       const connectedPairs = new Set<string>(); // track which node pairs have corridors
 
-      // DAG-edge corridors
-      for (const edge of layout.edges) {
-        const c = new Corridor(edge.from, edge.to);
-        const fd = dag.nodes.find((n) => n.nodeId === edge.from.nodeId);
-        const td = dag.nodes.find((n) => n.nodeId === edge.to.nodeId);
-        if (fd && td) c.update(fd.status, td.status, false);
-        corridorsRef.current.push(c);
-        corridorMap.set(`${edge.from.nodeId}:${edge.to.nodeId}`, c);
-        corridorMap.set(`${edge.to.nodeId}:${edge.from.nodeId}`, c);
-        connectedPairs.add(`${edge.from.nodeId}:${edge.to.nodeId}`);
-        connectedPairs.add(`${edge.to.nodeId}:${edge.from.nodeId}`);
-        c.zIndex = Z.corridor;
-        world.addChildAt(c, 1);
-      }
+      if (topoChanged) {
+        // Corridors — recreate only when topology changes
+        for (const c of corridorsRef.current) { world.removeChild(c); c.destroy(); }
+        corridorsRef.current = [];
 
-      // Grid-adjacency corridors — connect 4-directional neighbors
-      const gridLookup = new Map<string, typeof layout.nodes[0]>();
-      for (const ln of layout.nodes) {
-        gridLookup.set(`${ln.gridCol},${ln.gridRow}`, ln);
-      }
-      const directions: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-      for (const ln of layout.nodes) {
-        for (const [dc, dr] of directions) {
-          const neighbor = gridLookup.get(`${ln.gridCol + dc},${ln.gridRow + dr}`);
-          if (!neighbor) continue;
-          const key = `${ln.nodeId}:${neighbor.nodeId}`;
-          if (connectedPairs.has(key)) continue;
-          const c = new Corridor(ln, neighbor);
+        // DAG-edge corridors
+        for (const edge of layout.edges) {
+          const c = new Corridor(edge.from, edge.to);
+          const fd = dag.nodes.find((n) => n.nodeId === edge.from.nodeId);
+          const td = dag.nodes.find((n) => n.nodeId === edge.to.nodeId);
+          if (fd && td) c.update(fd.status, td.status, false);
           corridorsRef.current.push(c);
-          corridorMap.set(key, c);
-          corridorMap.set(`${neighbor.nodeId}:${ln.nodeId}`, c);
-          connectedPairs.add(key);
-          connectedPairs.add(`${neighbor.nodeId}:${ln.nodeId}`);
+          corridorMap.set(`${edge.from.nodeId}:${edge.to.nodeId}`, c);
+          corridorMap.set(`${edge.to.nodeId}:${edge.from.nodeId}`, c);
+          connectedPairs.add(`${edge.from.nodeId}:${edge.to.nodeId}`);
+          connectedPairs.add(`${edge.to.nodeId}:${edge.from.nodeId}`);
           c.zIndex = Z.corridor;
           world.addChildAt(c, 1);
         }
-      }
 
-      // Place torches on corridors (2 per corridor at 25%/75% spine)
-      for (const t of torchesRef.current) { world.removeChild(t); t.destroy(); }
-      torchesRef.current = [];
-      for (const corridor of corridorsRef.current) {
-        const STEPS = 24; // matches SPINE_STEPS in Corridor
-        for (const pct of [0.25, 0.75]) {
-          const idx = Math.floor(STEPS * pct);
-          const pt = corridor.getSpinePoint(idx);
-          const nm = corridor.getNormal(idx);
-          if (pt && nm) {
-            const t1 = new TorchLight(pt[0] + nm[0] * 22, pt[1] + nm[1] * 22, false);
-            const t2 = new TorchLight(pt[0] - nm[0] * 22, pt[1] - nm[1] * 22, true);
-            t1.zIndex = Z.torch;
-            t2.zIndex = Z.torch;
-            torchesRef.current.push(t1, t2);
-            world.addChildAt(t1, 2);
-            world.addChildAt(t2, 2);
+        // Grid-adjacency corridors — connect 4-directional neighbors
+        const gridLookup = new Map<string, typeof layout.nodes[0]>();
+        for (const ln of layout.nodes) {
+          gridLookup.set(`${ln.gridCol},${ln.gridRow}`, ln);
+        }
+        const directions: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+        for (const ln of layout.nodes) {
+          for (const [dc, dr] of directions) {
+            const neighbor = gridLookup.get(`${ln.gridCol + dc},${ln.gridRow + dr}`);
+            if (!neighbor) continue;
+            const key = `${ln.nodeId}:${neighbor.nodeId}`;
+            if (connectedPairs.has(key)) continue;
+            const c = new Corridor(ln, neighbor);
+            corridorsRef.current.push(c);
+            corridorMap.set(key, c);
+            corridorMap.set(`${neighbor.nodeId}:${ln.nodeId}`, c);
+            connectedPairs.add(key);
+            connectedPairs.add(`${neighbor.nodeId}:${ln.nodeId}`);
+            c.zIndex = Z.corridor;
+            world.addChildAt(c, 1);
           }
+        }
+
+        // Place torches on corridors
+        for (const t of torchesRef.current) { world.removeChild(t); t.destroy(); }
+        torchesRef.current = [];
+        for (const corridor of corridorsRef.current) {
+          const STEPS = 24; // matches SPINE_STEPS in Corridor
+          for (const pct of [0.25, 0.75]) {
+            const idx = Math.floor(STEPS * pct);
+            const pt = corridor.getSpinePoint(idx);
+            const nm = corridor.getNormal(idx);
+            if (pt && nm) {
+              const t1 = new TorchLight(pt[0] + nm[0] * 22, pt[1] + nm[1] * 22, false);
+              const t2 = new TorchLight(pt[0] - nm[0] * 22, pt[1] - nm[1] * 22, true);
+              t1.zIndex = Z.torch;
+              t2.zIndex = Z.torch;
+              torchesRef.current.push(t1, t2);
+              world.addChildAt(t1, 2);
+              world.addChildAt(t2, 2);
+            }
+          }
+        }
+      } else {
+        // Topology unchanged — rebuild lookup maps from existing corridors
+        for (const c of corridorsRef.current) {
+          const fk = `${c.fromNode.nodeId}:${c.toNode.nodeId}`;
+          const tk = `${c.toNode.nodeId}:${c.fromNode.nodeId}`;
+          corridorMap.set(fk, c);
+          corridorMap.set(tk, c);
+          connectedPairs.add(fk);
+          connectedPairs.add(tk);
         }
       }
 
@@ -645,10 +665,14 @@ export function DungeonMap() {
         }
       }
 
+      const MAX_CREATURES = 25;
+
       // Helper: spawn creatures near an agent
       const spawnCreaturesNear = (x: number, y: number, count: number) => {
+        if (creaturesRef.current.length >= MAX_CREATURES) return;
         const types: CreatureType[] = ["slime", "bat", "rat"];
         for (let c = 0; c < count; c++) {
+          if (creaturesRef.current.length >= MAX_CREATURES) break;
           const angle = (Math.PI * 2 * c) / count + (Math.random() - 0.5);
           const dist = 30 + Math.random() * 50;
           const cx = x + Math.cos(angle) * dist;

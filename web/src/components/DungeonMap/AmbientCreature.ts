@@ -119,6 +119,8 @@ export class AmbientCreature extends Container {
   private fleeDistance = 0;
   private dead = false;
   private fadeAlpha = 1;
+  private lifeTicks = 0;
+  private static readonly MAX_LIFE_TICKS = 900; // ~15s at 60fps
 
   constructor(
     type: CreatureType,
@@ -149,12 +151,23 @@ export class AmbientCreature extends Container {
 
     this.time += dt;
     this.animTimer += dt;
+    this.lifeTicks += dt;
 
     // Frame cycling
     if (this.animTimer >= ANIM_INTERVAL) {
       this.animTimer = 0;
       this.frameIndex = (this.frameIndex + 1) % 2;
       this.drawFrame();
+    }
+
+    // TTL fade-out after MAX_LIFE_TICKS
+    if (this.lifeTicks > AmbientCreature.MAX_LIFE_TICKS) {
+      this.fadeAlpha -= 0.015 * dt;
+      this.alpha = Math.max(0, this.fadeAlpha);
+      if (this.fadeAlpha <= 0) {
+        this.dead = true;
+        return;
+      }
     }
 
     const speed = CREATURE_SPEED[this.type];

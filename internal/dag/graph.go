@@ -100,6 +100,46 @@ func (g *Graph) canReach(start, target string) bool {
 	return false
 }
 
+// RemoveNode removes a node and all edges that reference it. No-op if the node does not exist.
+func (g *Graph) RemoveNode(id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.nodes[id]; !ok {
+		return
+	}
+	delete(g.nodes, id)
+
+	// Drop edges involving this node
+	kept := g.edges[:0]
+	for _, e := range g.edges {
+		if e.From != id && e.To != id {
+			kept = append(kept, e)
+		}
+	}
+	g.edges = kept
+
+	// Update neighbour adjacency lists
+	for _, nb := range g.outgoing[id] {
+		g.incoming[nb] = filterStrings(g.incoming[nb], id)
+	}
+	for _, nb := range g.incoming[id] {
+		g.outgoing[nb] = filterStrings(g.outgoing[nb], id)
+	}
+	delete(g.outgoing, id)
+	delete(g.incoming, id)
+}
+
+// filterStrings returns ss with all occurrences of exclude removed (in-place).
+func filterStrings(ss []string, exclude string) []string {
+	out := ss[:0]
+	for _, s := range ss {
+		if s != exclude {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // SetNodeStatus updates a node's status
 func (g *Graph) SetNodeStatus(id string, status protocol.NodeStatus) error {
 	g.mu.Lock()

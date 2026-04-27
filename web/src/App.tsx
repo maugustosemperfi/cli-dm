@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useState, useCallback } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useWorldSync } from "./hooks/useWorldSync";
 import { DungeonMap } from "./components/DungeonMap/DungeonMap";
@@ -21,6 +21,8 @@ export const useCommand = () => useContext(CommandContext);
 
 export function App() {
   const { sendCommand } = useWebSocket({ url: WS_URL });
+  const [showTimeline, setShowTimeline] = useState(false);
+  const toggleTimeline = useCallback(() => setShowTimeline((v) => !v), []);
 
   // Load persistent world state on mount
   const loadFromStorage = useWorldState((s) => s.loadFromStorage);
@@ -80,9 +82,42 @@ export function App() {
         <AgentSidebar />
       </div>
 
-      {/* Bottom-left: Gantt Timeline */}
+      {/* Bottom-left: Concurrency Timeline (opt-in) */}
       <div style={{ borderRight: "1px solid #3f4147", overflow: "hidden" }}>
-        <Timeline />
+        {showTimeline ? (
+          <Timeline onClose={toggleTimeline} />
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "6px 8px",
+              fontFamily: "monospace",
+              fontSize: 12,
+              color: "#6d6f78",
+              height: "100%",
+              boxSizing: "border-box",
+            }}
+          >
+            <span>Concurrency Timeline</span>
+            <button
+              onClick={toggleTimeline}
+              style={{
+                background: "none",
+                border: "1px solid #3f4147",
+                borderRadius: 3,
+                color: "#8b9aab",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                fontSize: 11,
+                padding: "2px 8px",
+              }}
+            >
+              activate
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Bottom-right: Live Feed */}

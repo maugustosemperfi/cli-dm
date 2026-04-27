@@ -34,7 +34,7 @@ interface TooltipState {
   y: number;
 }
 
-export function Timeline() {
+export function Timeline({ onClose }: { onClose?: () => void }) {
   const timeline = useGameState((s) => s.timeline);
   const agents = useGameState((s) => s.agents);
   const selectedAgent = useGameState((s) => s.selectedAgent);
@@ -402,6 +402,24 @@ export function Timeline() {
       >
         <span>Concurrency Timeline</span>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {onClose && (
+            <button
+              onClick={onClose}
+              title="Deactivate timeline"
+              style={{
+                background: "none",
+                border: "1px solid #3f4147",
+                borderRadius: 3,
+                color: "#6d6f78",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                fontSize: 11,
+                padding: "1px 6px",
+              }}
+            >
+              ×
+            </button>
+          )}
           <span style={{ color: "#6d6f78" }}>{agentIds.length} agents</span>
           <div style={{ display: "flex", alignItems: "center", gap: 2, marginLeft: 8 }}>
             <button
