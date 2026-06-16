@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import { soundManager } from "../../audio/SoundManager";
+import { getScenePerfSnapshot, isPerfOverlayEnabled } from "../../lib/scenePerf";
 
 export function StatusBar() {
   const agents = useGameState((s) => s.agents);
@@ -14,6 +15,13 @@ export function StatusBar() {
   const [soundOn, setSoundOn] = useState(soundManager.isEnabled());
   const [pruneMinutes, setPruneMinutes] = useState("30");
   const [pruneFeedback, setPruneFeedback] = useState<string | null>(null);
+  const [perf, setPerf] = useState(() => (isPerfOverlayEnabled() ? getScenePerfSnapshot() : null));
+
+  useEffect(() => {
+    if (!isPerfOverlayEnabled()) return;
+    const id = setInterval(() => setPerf(getScenePerfSnapshot()), 2000);
+    return () => clearInterval(id);
+  }, []);
 
   const agentList = Array.from(agents.values());
   const active = agentList.filter(
@@ -124,6 +132,22 @@ export function StatusBar() {
       </span>
       <span>Parallelization: {efficiency}%</span>
       <span title="Events in ring buffer">Events: {transcript}</span>
+
+      {perf && (
+        <>
+          <span style={{ color: "#3f4147" }}>|</span>
+          <span
+            title="Pixi sync tiers per minute (T0=topology T1=agents T2=overlays T3=selection)"
+            style={{ fontSize: 11, color: "#6b7280" }}
+          >
+            sync/min {perf.totalPerMin}
+            {" "}
+            (T0:{perf.tiersPerMin.T0} T1:{perf.tiersPerMin.T1} T2:{perf.tiersPerMin.T2})
+            {perf.jsHeapMB != null && ` heap:${perf.jsHeapMB}MB`}
+            {perf.scene && ` r:${perf.scene.rooms} s:${perf.scene.sprites}`}
+          </span>
+        </>
+      )}
 
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
         {pruneFeedback && (
