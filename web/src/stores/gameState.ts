@@ -261,6 +261,8 @@ interface GameState {
   searchFilters: SearchFilters;
   focusNodeId: string | null;  // set to pan camera to a room
   reducedEffects: boolean;
+  scenePurgeToken: number;
+  scenePurgeKind: "clear" | "prune" | null;
 
   // Actions
   handleEvent: (event: GameEvent) => void;
@@ -466,6 +468,8 @@ export const useGameState = create<GameState>((set, get) => ({
   searchFilters: { agentIds: [], actionTypes: [], timeRange: "all" },
   focusNodeId: null,
   reducedEffects: loadReducedEffects(),
+  scenePurgeToken: 0,
+  scenePurgeKind: null,
 
   spawnBoss: (type, agentId, nodeId, reason) => {
     const state = get();
@@ -596,6 +600,8 @@ export const useGameState = create<GameState>((set, get) => ({
       roomMetrics: new Map(),
       burnRates: new Map(),
       roomHistory: new Map(),
+      scenePurgeToken: get().scenePurgeToken + 1,
+      scenePurgeKind: "clear",
     });
   },
 
@@ -655,6 +661,8 @@ export const useGameState = create<GameState>((set, get) => ({
       burnRates,
       roomHistory,
       agents,
+      scenePurgeToken: state.scenePurgeToken + 1,
+      scenePurgeKind: "prune",
     });
     return removed;
   },
