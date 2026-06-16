@@ -851,8 +851,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	logger.Info("snapshot endpoint mounted", "endpoint", "/api/snapshot")
 
 	// Serve static files from web/dist if it exists
-	exePath, _ := os.Executable()
-	webDist := filepath.Join(filepath.Dir(exePath), "web", "dist")
+	webDist := server.ResolveWebDist()
+	logger.Info("static files", "path", webDist)
 	mux.Handle("/", server.StaticHandler(webDist))
 
 	srv := &http.Server{

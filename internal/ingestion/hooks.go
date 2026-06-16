@@ -23,26 +23,28 @@ type agentMeta struct {
 // (PostToolUse, PreToolUse, SessionStart, Stop, etc.) and converts them
 // into protocol events via the shared Mapper.
 type HookReceiver struct {
-	mp         *mapper.Mapper
-	eventSink  EventSink
-	logger     *slog.Logger
-	mu         sync.RWMutex
-	sessionMap map[string]string    // Claude session ID → CLI_DM agent ID
-	agentInfo  map[string]agentMeta // CLI_DM agent ID → meta
-	authToken  string
-	nextID     int
+	mp           *mapper.Mapper
+	eventSink    EventSink
+	logger       *slog.Logger
+	mu           sync.RWMutex
+	sessionMap   map[string]string    // session ID → CLI_DM agent ID
+	agentInfo    map[string]agentMeta // CLI_DM agent ID → meta
+	authToken    string
+	nextByPrefix map[string]int // per-source agent counter ("claude", "cursor", …)
+	nextSubSeq   int
 }
 
 // NewHookReceiver creates a HookReceiver. If token is non-empty, incoming
 // requests must include a matching Authorization: Bearer header.
 func NewHookReceiver(mp *mapper.Mapper, sink EventSink, token string, logger *slog.Logger) *HookReceiver {
 	return &HookReceiver{
-		mp:         mp,
-		eventSink:  sink,
-		logger:     logger,
-		sessionMap: make(map[string]string),
-		agentInfo:  make(map[string]agentMeta),
-		authToken:  token,
+		mp:           mp,
+		eventSink:    sink,
+		logger:       logger,
+		sessionMap:   make(map[string]string),
+		agentInfo:    make(map[string]agentMeta),
+		authToken:    token,
+		nextByPrefix: make(map[string]int),
 	}
 }
 
@@ -140,8 +142,9 @@ func (h *HookReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// resolveAgent looks up the CLI_DM agent ID for a Claude session.
-// If not found, auto-creates a new agent mapping.
+// resolveAgent looks up the CLI_DM agent ID for a hook session.
+// If not found, auto-creates a new agent mapping using payload.source
+// ("claude" from Claude Code hooks, "cursor" from cursor-dm-relay).
 func (h *HookReceiver) resolveAgent(payload map[string]any) string {
 	sessionID, _ := payload["session_id"].(string)
 	if sessionID == "" {
@@ -164,20 +167,24 @@ func (h *HookReceiver) resolveAgent(payload map[string]any) string {
 		return agentID
 	}
 
-	h.nextID++
-	agentID = fmt.Sprintf("claude-%d", h.nextID)
+	prefix := hookSourcePrefix(payload)
+	h.nextByPrefix[prefix]++
+	n := h.nextByPrefix[prefix]
+	agentID = fmt.Sprintf("%s-%d", prefix, n)
 	h.sessionMap[sessionID] = agentID
 
 	roles := []protocol.AgentRole{
 		protocol.RoleWarrior, protocol.RoleRogue, protocol.RoleMage,
 		protocol.RoleRanger, protocol.RoleCleric, protocol.RoleBard,
 	}
-	role := roles[(h.nextID-1)%len(roles)]
-
-	name := agentID
-	if model, _ := payload["model"].(string); model != "" {
-		name = fmt.Sprintf("claude-%d (%s)", h.nextID, model)
+	role := roles[(n-1)%len(roles)]
+	if prefix == "cursor" {
+		role = protocol.RoleMage
+	} else if prefix == "claude" {
+		role = protocol.RoleRogue
 	}
+
+	name := hookDisplayName(prefix, n)
 
 	h.agentInfo[agentID] = agentMeta{Name: name, Role: role}
 
@@ -194,6 +201,23 @@ func (h *HookReceiver) resolveAgent(payload map[string]any) string {
 	}
 
 	return agentID
+}
+
+func hookSourcePrefix(payload map[string]any) string {
+	if source, ok := payload["source"].(string); ok {
+		source = strings.ToLower(strings.TrimSpace(source))
+		if source != "" {
+			return source
+		}
+	}
+	return "claude"
+}
+
+func hookDisplayName(prefix string, n int) string {
+	if n <= 1 {
+		return prefix
+	}
+	return fmt.Sprintf("%s %d", prefix, n)
 }
 
 // buildToolEvent converts a hook payload into a ToolEvent based on hook type.
@@ -301,8 +325,8 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 
 // nextSubID returns an incrementing subagent counter for a given parent agent.
 func (h *HookReceiver) nextSubID(parentID string) int {
-	h.nextID++
-	return h.nextID
+	h.nextSubSeq++
+	return h.nextSubSeq
 }
 
 // spawnSubagent emits a spawn event for a new subagent character.
@@ -312,7 +336,7 @@ func (h *HookReceiver) spawnSubagent(subAgentID, name string) {
 		protocol.RoleRogue, protocol.RoleMage, protocol.RoleRanger,
 		protocol.RoleCleric, protocol.RoleBard,
 	}
-	role := roles[h.nextID%len(roles)]
+	role := roles[h.nextSubSeq%len(roles)]
 	h.agentInfo[subAgentID] = agentMeta{Name: name, Role: role}
 	h.mu.Unlock()
 

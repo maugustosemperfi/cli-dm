@@ -4,7 +4,37 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 )
+
+// ResolveWebDist locates the built Vite output (web/dist).
+// Checks next to the binary (bin/web/dist), repo root (../web/dist from bin/),
+// and the current working directory.
+func ResolveWebDist() string {
+	var candidates []string
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "web", "dist"),
+			filepath.Join(dir, "..", "web", "dist"),
+		)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(wd, "web", "dist"))
+	}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs
+			}
+			return p
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return "web/dist"
+}
 
 // StaticHandler serves the built web frontend.
 // In dev mode, Vite serves directly; this is for production builds.

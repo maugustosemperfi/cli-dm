@@ -235,21 +235,12 @@ func (m *Mapper) handleToolEnd(te ToolEvent) []protocol.Event {
 }
 
 func (m *Mapper) handleSessionLife(te ToolEvent) []protocol.Event {
-	now := protocol.NowMs()
 	if te.IsStart {
-		ev, err := protocol.NewEvent(protocol.AgentSpawn{
-			Type:    protocol.TypeAgentSpawn,
-			AgentID: te.AgentID,
-			Name:    te.AgentID,
-			Role:    protocol.RoleWarrior,
-			Ts:      now,
-		})
-		if err != nil {
-			return nil
-		}
-		return []protocol.Event{ev}
+		// Spawn is emitted by HookReceiver (resolveAgent / spawnSubagent) before
+		// SessionLife reaches the mapper — avoid duplicate spawns with wrong names.
+		return nil
 	}
-	// Session complete
+	now := protocol.NowMs()
 	ev, err := protocol.NewEvent(protocol.AgentComplete{
 		Type:     protocol.TypeAgentComplete,
 		AgentID:  te.AgentID,

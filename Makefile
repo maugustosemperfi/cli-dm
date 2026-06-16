@@ -1,4 +1,8 @@
-.PHONY: build build-go build-web dev dev-unified-go dev-demo dev-demo-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go cursor-relay clean run test test-mcp
+.PHONY: build build-go build-web dev dev-unified-go dev-demo dev-demo-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go cursor-relay prod prod-go prod-run serve clean run test test-mcp
+
+# Hook token for live sessions (override: export CLI_DM_HOOK_TOKEN=...)
+HOOK_TOKEN ?= dungeon-live-2026
+PROD_CONFIG ?= dungeon-unified.yaml
 
 # Default target
 build: build-go build-web
@@ -19,6 +23,27 @@ dev:
 	@echo "  Vite dev:   http://localhost:5173"
 	@echo ""
 	@$(MAKE) dev-unified-go & $(MAKE) dev-web & $(MAKE) cursor-relay & wait
+
+# Production — build once, serve built UI + API on :8420 (no Vite).
+# Same integrations as dev: Claude hooks, Cursor relay, JSONL watch.
+# Usage:
+#   make prod
+#   make prod PROD_CONFIG=dungeon-hooks.yaml
+serve: prod
+
+prod: build
+	@echo "Starting CLI_DM (production build)..."
+	@echo "  App:  http://localhost:8420"
+	@echo ""
+	@$(MAKE) prod-run
+
+prod-run:
+	@CLI_DM_HOOK_TOKEN="$${CLI_DM_HOOK_TOKEN:-$(HOOK_TOKEN)}" $(MAKE) prod-go & \
+	 CLI_DM_HOOK_TOKEN="$${CLI_DM_HOOK_TOKEN:-$(HOOK_TOKEN)}" $(MAKE) cursor-relay & \
+	 wait
+
+prod-go:
+	./bin/cli-dm run --config $(PROD_CONFIG)
 
 dev-unified-go:
 	go run ./cmd/cli-dm run --config dungeon-unified.yaml
