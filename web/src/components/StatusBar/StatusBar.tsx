@@ -6,7 +6,14 @@ export function StatusBar() {
   const agents = useGameState((s) => s.agents);
   const connected = useGameState((s) => s.connected);
   const dag = useGameState((s) => s.dag);
+  const transcript = useGameState((s) => s.transcript);
+  const clearEvents = useGameState((s) => s.clearEvents);
+  const pruneEventsOlderThan = useGameState((s) => s.pruneEventsOlderThan);
+  const reducedEffects = useGameState((s) => s.reducedEffects);
+  const setReducedEffects = useGameState((s) => s.setReducedEffects);
   const [soundOn, setSoundOn] = useState(soundManager.isEnabled());
+  const [pruneMinutes, setPruneMinutes] = useState("30");
+  const [pruneFeedback, setPruneFeedback] = useState<string | null>(null);
 
   const agentList = Array.from(agents.values());
   const active = agentList.filter(
@@ -20,6 +27,38 @@ export function StatusBar() {
 
   const tasksCompleted = dag.nodes.filter((n) => n.status === "completed").length;
   const tasksTotal = dag.nodes.length;
+
+  const handleClear = () => {
+    if (!window.confirm("Clear all events from this session? Agents and tasks stay on the map.")) {
+      return;
+    }
+    clearEvents();
+    setPruneFeedback("cleared");
+    setTimeout(() => setPruneFeedback(null), 2000);
+  };
+
+  const handlePrune = () => {
+    const minutes = parseInt(pruneMinutes, 10);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      setPruneFeedback("invalid");
+      setTimeout(() => setPruneFeedback(null), 2000);
+      return;
+    }
+    const removed = pruneEventsOlderThan(minutes);
+    setPruneFeedback(`-${removed}`);
+    setTimeout(() => setPruneFeedback(null), 2500);
+  };
+
+  const btnStyle = {
+    background: "none",
+    border: "1px solid #3f4147",
+    borderRadius: 3,
+    color: "#8b9aab",
+    fontFamily: "monospace",
+    fontSize: 11,
+    cursor: "pointer",
+    padding: "2px 6px",
+  } as const;
 
   return (
     <div
@@ -84,29 +123,83 @@ export function StatusBar() {
         Tasks: {tasksCompleted}/{tasksTotal}
       </span>
       <span>Parallelization: {efficiency}%</span>
+      <span title="Transcript entries in memory">Events: {transcript.length}</span>
 
-      <span style={{ color: "#3f4147" }}>|</span>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+        {pruneFeedback && (
+          <span style={{ color: pruneFeedback === "invalid" ? "#bf6b5b" : "#5baf7b", fontSize: 11 }}>
+            {pruneFeedback === "cleared"
+              ? "Events cleared"
+              : pruneFeedback === "invalid"
+                ? "Enter minutes > 0"
+                : `Pruned ${pruneFeedback.slice(1)} items`}
+          </span>
+        )}
 
-      {/* Sound toggle */}
-      <button
-        onClick={() => {
-          soundManager.toggle();
-          setSoundOn(soundManager.isEnabled());
-        }}
-        style={{
-          background: "none",
-          border: "1px solid #3f4147",
-          borderRadius: 3,
-          color: soundOn ? "#5baf7b" : "#4e5058",
-          fontFamily: "monospace",
-          fontSize: 11,
-          cursor: "pointer",
-          padding: "2px 6px",
-        }}
-        title={soundOn ? "Mute sounds" : "Unmute sounds"}
-      >
-        {soundOn ? "SND ON" : "SND OFF"}
-      </button>
+        <button
+          onClick={handleClear}
+          style={{ ...btnStyle, color: "#bf6b5b" }}
+          title="Clear transcript, timeline, and event logs (keeps agents on map)"
+        >
+          CLEAR
+        </button>
+
+        <span style={{ color: "#3f4147" }}>|</span>
+
+        <input
+          type="number"
+          min={1}
+          value={pruneMinutes}
+          onChange={(e) => setPruneMinutes(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handlePrune()}
+          style={{
+            width: 42,
+            background: "#2b2d31",
+            border: "1px solid #3f4147",
+            borderRadius: 3,
+            color: "#dbdee1",
+            fontFamily: "monospace",
+            fontSize: 11,
+            padding: "2px 4px",
+          }}
+          title="Age threshold in minutes"
+        />
+        <span style={{ fontSize: 11 }}>min</span>
+        <button
+          onClick={handlePrune}
+          style={btnStyle}
+          title="Remove events older than the given minutes"
+        >
+          PRUNE
+        </button>
+
+        <span style={{ color: "#3f4147" }}>|</span>
+
+        <button
+          onClick={() => setReducedEffects(!reducedEffects)}
+          style={{
+            ...btnStyle,
+            color: reducedEffects ? "#5baf7b" : "#8b9aab",
+          }}
+          title={reducedEffects ? "Lite mode on (fewer map effects)" : "Enable lite mode (disable ambient creatures)"}
+        >
+          {reducedEffects ? "LITE ON" : "LITE OFF"}
+        </button>
+
+        <button
+          onClick={() => {
+            soundManager.toggle();
+            setSoundOn(soundManager.isEnabled());
+          }}
+          style={{
+            ...btnStyle,
+            color: soundOn ? "#5baf7b" : "#4e5058",
+          }}
+          title={soundOn ? "Mute sounds" : "Unmute sounds"}
+        >
+          {soundOn ? "SND ON" : "SND OFF"}
+        </button>
+      </div>
     </div>
   );
 }

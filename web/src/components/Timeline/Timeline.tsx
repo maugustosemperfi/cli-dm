@@ -46,6 +46,8 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isScrolledRef = useRef(true);
   const animFrameRef = useRef<number | null>(null);
+  const scrollLeftRef = useRef(0);
+  const viewportWidthRef = useRef(800);
 
   const [zoomIndex, setZoomIndex] = useState(2); // default index 2 = value 8
   const pixelsPerSecond = ZOOM_LEVELS[zoomIndex];
@@ -53,7 +55,10 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 
   // Group segments by agent
-  const agentIds = [...new Set(timeline.map((s) => s.agentId))];
+  const agentIds = useMemo(
+    () => [...new Set(timeline.map((s) => s.agentId))],
+    [timeline]
+  );
 
   // Auto-scroll to right (latest time)
   useEffect(() => {
@@ -186,10 +191,23 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
     ctx.lineTo(HEADER_WIDTH, totalHeight);
     ctx.stroke();
 
-    // Draw segments
+    // Draw segments (viewport-culled)
+    const viewScroll = scrollLeftRef.current;
+    const viewWidth = viewportWidthRef.current;
+    const visibleXMin = viewScroll - 80;
+    const visibleXMax = viewScroll + viewWidth + 80;
+
     for (const seg of timeline) {
       const laneIdx = agentIds.indexOf(seg.agentId);
       if (laneIdx < 0) continue;
+
+      const xStart =
+        HEADER_WIDTH + ((seg.startTs - startTime) / 1000) * pixelsPerSecond;
+      const xEnd = seg.endTs
+        ? HEADER_WIDTH + ((seg.endTs - startTime) / 1000) * pixelsPerSecond
+        : HEADER_WIDTH + ((now - startTime) / 1000) * pixelsPerSecond;
+      const segRight = Math.max(xEnd, xStart + MIN_BLOCK_WIDTH);
+      if (segRight < visibleXMin || xStart > visibleXMax) continue;
 
       // Search-aware dimming
       const segKey = `${seg.agentId}-${seg.startTs}`;
@@ -198,11 +216,6 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
 
       const y = TIME_AXIS_HEIGHT + laneIdx * LANE_HEIGHT + 3;
       const h = LANE_HEIGHT - 6;
-      const xStart =
-        HEADER_WIDTH + ((seg.startTs - startTime) / 1000) * pixelsPerSecond;
-      const xEnd = seg.endTs
-        ? HEADER_WIDTH + ((seg.endTs - startTime) / 1000) * pixelsPerSecond
-        : HEADER_WIDTH + ((now - startTime) / 1000) * pixelsPerSecond;
       const w = Math.max(MIN_BLOCK_WIDTH, xEnd - xStart);
 
       const baseColor = ACTION_COLORS[seg.action] ?? "#4e5058";
@@ -315,9 +328,26 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
+    scrollLeftRef.current = el.scrollLeft;
+    viewportWidthRef.current = el.clientWidth;
     const nearRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 30;
     isScrolledRef.current = nearRight;
+    draw();
   };
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    viewportWidthRef.current = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) {
+        viewportWidthRef.current = containerRef.current.clientWidth;
+        draw();
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [draw]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -352,6 +382,11 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
     const now = Date.now();
     const agentId = agentIds[laneIdx];
 
+    const viewScroll = scrollLeftRef.current;
+    const viewWidth = viewportWidthRef.current;
+    const visibleXMin = viewScroll - 80;
+    const visibleXMax = viewScroll + viewWidth + 80;
+
     for (const seg of timeline) {
       if (seg.agentId !== agentId) continue;
       const xStart =
@@ -359,7 +394,9 @@ export function Timeline({ onClose }: { onClose?: () => void }) {
       const xEnd = seg.endTs
         ? HEADER_WIDTH + ((seg.endTs - startTime) / 1000) * pixelsPerSecond
         : HEADER_WIDTH + ((now - startTime) / 1000) * pixelsPerSecond;
-      if (x >= xStart && x <= Math.max(xEnd, xStart + MIN_BLOCK_WIDTH)) {
+      const segRight = Math.max(xEnd, xStart + MIN_BLOCK_WIDTH);
+      if (segRight < visibleXMin || xStart > visibleXMax) continue;
+      if (x >= xStart && x <= segRight) {
         const dur = (seg.endTs ?? now) - seg.startTs;
         const text = `${seg.action}${seg.detail ? ": " + seg.detail : ""} (${formatDuration(dur)})`;
         // Position tooltip relative to the container div, not the canvas

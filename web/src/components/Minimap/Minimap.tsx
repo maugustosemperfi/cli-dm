@@ -1,7 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { DAGSnapshot } from "../../protocol/events";
-import type { AgentState, RoomMetrics } from "../../stores/gameState";
-import { AGENT_COLORS } from "../../stores/gameState";
+import { useGameState, AGENT_COLORS, type AgentState } from "../../stores/gameState";
 import { computeLayout } from "../DungeonMap/layout";
 import type { Camera } from "../DungeonMap/Camera";
 
@@ -13,7 +12,6 @@ interface MinimapProps {
   dag: DAGSnapshot;
   agents: Map<string, AgentState>;
   camera: Camera | null;
-  roomMetrics?: Map<string, RoomMetrics>;
   onClickWorld: (worldX: number, worldY: number) => void;
 }
 
@@ -71,7 +69,8 @@ function drawMinimapBuilding(
   }
 }
 
-export function Minimap({ dag, agents, camera, roomMetrics, onClickWorld }: MinimapProps) {
+export function Minimap({ dag, agents, camera, onClickWorld }: MinimapProps) {
+  const roomMetrics = useGameState((s) => s.roomMetrics);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>(0);
   const isDraggingRef = useRef(false);

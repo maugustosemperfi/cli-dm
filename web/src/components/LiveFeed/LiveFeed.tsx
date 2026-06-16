@@ -2,6 +2,9 @@ import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import type { TranscriptEntry } from "../../stores/gameState";
 import { SearchBar } from "./SearchBar";
+import { VirtualList } from "../VirtualList";
+
+const FEED_ROW_HEIGHT = 20;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -336,13 +339,9 @@ export function LiveFeed() {
     ? transcript.filter((e) => e.agentId === selectedAgent)
     : transcript;
 
-  // Track scroll position
-  const handleScroll = useCallback(() => {
-    const el = feedRef.current;
-    if (!el) return;
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setNearBottom(distFromBottom <= 50);
-    if (distFromBottom <= 50) setHasNew(false);
+  const handleScroll = useCallback((isNearBottom: boolean) => {
+    setNearBottom(isNearBottom);
+    if (isNearBottom) setHasNew(false);
   }, []);
 
   // Auto-scroll when new entries arrive, if near bottom
@@ -355,8 +354,7 @@ export function LiveFeed() {
     } else {
       setHasNew(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries.length]);
+  }, [entries.length, nearBottom]);
 
   const scrollToBottom = () => {
     const el = feedRef.current;
@@ -365,6 +363,23 @@ export function LiveFeed() {
     setNearBottom(true);
     setHasNew(false);
   };
+
+  const renderFeedRow = useCallback(
+    (entry: TranscriptEntry, i: number) => {
+      const entryKey = `${entry.ts}-${entry.agentId}`;
+      const isMatch = filteredSet ? filteredSet.has(entryKey) : false;
+      return (
+        <FeedRow
+          entry={entry}
+          index={i}
+          searchQuery={hasActiveSearch ? searchQuery : undefined}
+          isMatch={hasActiveSearch ? isMatch : undefined}
+          onJump={entry.agentId ? () => jumpToAgent(entry.agentId) : undefined}
+        />
+      );
+    },
+    [filteredSet, hasActiveSearch, searchQuery, jumpToAgent]
+  );
 
   return (
     <div
@@ -386,19 +401,15 @@ export function LiveFeed() {
         onSelect={selectAgent}
       />
 
-      {/* scrolling feed */}
-      <div
-        ref={feedRef}
+      {/* scrolling feed — windowed for long sessions */}
+      <VirtualList
+        scrollRef={feedRef}
+        items={entries}
+        itemHeight={FEED_ROW_HEIGHT}
         onScroll={handleScroll}
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          background: "#2b2d31",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {entries.length === 0 && (
+        getItemKey={(entry, i) => `${entry.ts}-${entry.agentId}-${i}`}
+        renderItem={renderFeedRow}
+        emptyMessage={
           <div
             style={{
               color: "#6d6f78",
@@ -409,22 +420,8 @@ export function LiveFeed() {
           >
             No activity yet…
           </div>
-        )}
-        {entries.map((entry, i) => {
-          const entryKey = `${entry.ts}-${entry.agentId}`;
-          const isMatch = filteredSet ? filteredSet.has(entryKey) : false;
-          return (
-            <FeedRow
-              key={`${entryKey}-${i}`}
-              entry={entry}
-              index={i}
-              searchQuery={hasActiveSearch ? searchQuery : undefined}
-              isMatch={hasActiveSearch ? isMatch : undefined}
-              onJump={entry.agentId ? () => jumpToAgent(entry.agentId) : undefined}
-            />
-          );
-        })}
-      </div>
+        }
+      />
 
       {/* "new activity" floating button */}
       {hasNew && !nearBottom && (

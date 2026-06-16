@@ -30,8 +30,6 @@ type Hub struct {
 	clients        map[*wsClient]struct{}
 	snapshotFn     SnapshotFunc
 	logger         *slog.Logger
-	eventBuffer    []protocol.Event // Ring buffer of recent events for replay
-	bufferMax      int
 	eventStore     EventStore     // optional session persistence
 	commandHandler CommandHandler // optional handler for browser commands
 }
@@ -48,7 +46,6 @@ func NewHub(snapshotFn SnapshotFunc, logger *slog.Logger) *Hub {
 		clients:    make(map[*wsClient]struct{}),
 		snapshotFn: snapshotFn,
 		logger:     logger,
-		bufferMax:  1000,
 	}
 }
 
@@ -75,12 +72,8 @@ func (h *Hub) Broadcast(ev protocol.Event) {
 		return
 	}
 
-	// Buffer the event
+	// Collect clients under lock; persistence is optional.
 	h.mu.Lock()
-	h.eventBuffer = append(h.eventBuffer, ev)
-	if len(h.eventBuffer) > h.bufferMax {
-		h.eventBuffer = h.eventBuffer[len(h.eventBuffer)-h.bufferMax:]
-	}
 	clients := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		clients = append(clients, c)

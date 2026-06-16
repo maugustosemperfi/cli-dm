@@ -43,7 +43,17 @@ type Mapper struct {
 	activeSubagents map[string]string
 	spawnedSubs     map[string]bool // subagentID → already spawned (dedup)
 	subCount        int
+	// Dedupe rapid identical action.start emissions (hooks can double-fire).
+	lastStarts map[string]startDedupe
 }
+
+type startDedupe struct {
+	action protocol.ActionType
+	detail string
+	ts     int64
+}
+
+const startDedupeWindowMs = 300
 
 // subagentRoles for round-robin assignment
 var mapperSubRoles = []protocol.AgentRole{
@@ -57,6 +67,7 @@ func New() *Mapper {
 		states:          make(map[string]*parser.AgentState),
 		activeSubagents: make(map[string]string),
 		spawnedSubs:     make(map[string]bool),
+		lastStarts:      make(map[string]startDedupe),
 	}
 }
 
@@ -83,6 +94,9 @@ func (m *Mapper) PruneAgent(agentID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.states, agentID)
+	if m.lastStarts != nil {
+		delete(m.lastStarts, agentID)
+	}
 	subPrefix := agentID + ":"
 	for toolUseID, subID := range m.activeSubagents {
 		if subID == agentID || strings.HasPrefix(subID, subPrefix) {
@@ -115,13 +129,30 @@ func (m *Mapper) Map(te ToolEvent) []protocol.Event {
 }
 
 func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
-	state := m.GetState(te.AgentID)
 	action, detail := mapToolName(te.ToolName, te.Input)
-	r := state.Transition(action, detail)
-	events := r.Events
+	now := protocol.NowMs()
+
+	m.mu.Lock()
+	if m.lastStarts == nil {
+		m.lastStarts = make(map[string]startDedupe)
+	}
+	prev, seen := m.lastStarts[te.AgentID]
+	dup := seen && prev.action == action && prev.detail == detail && now-prev.ts < startDedupeWindowMs
+	if !dup {
+		m.lastStarts[te.AgentID] = startDedupe{action: action, detail: detail, ts: now}
+	}
+	m.mu.Unlock()
+
+	var events []protocol.Event
+	if !dup {
+		state := m.GetState(te.AgentID)
+		r := state.Transition(action, detail)
+		events = r.Events
+	}
 
 	// API errors → also emit a blocker so the agent visually shows as stuck
-	if te.ToolName == "__api_error__" {
+	if !dup && te.ToolName == "__api_error__" {
+		state := m.GetState(te.AgentID)
 		events = append(events, state.MarkBlocked(protocol.BlockerTimeout, "", truncate(detail, 200)))
 	}
 

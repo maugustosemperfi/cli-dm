@@ -68,6 +68,9 @@ type JSONLWatcher struct {
 	// the owner (main.go) can release watchedPaths/watchers entries and let the
 	// rediscovery ticker re-engage the session if its JSONL resumes activity.
 	onStop func()
+
+	// useCoordinator registers with the shared poll loop instead of a per-file ticker.
+	useCoordinator bool
 }
 
 // NewJSONLWatcher creates a watcher for the given JSONL file path.
@@ -81,10 +84,11 @@ func NewJSONLWatcher(filePath, agentID string, mp *mapper.Mapper, sink EventSink
 		filePath:    filePath,
 		done:        make(chan struct{}),
 		agentID:     agentID,
-		firstRead:   true,
-		knownAgents: known,
-		inferStates: make(map[string]*inferredState),
-		cursorUsage: newCursorUsageReader(filePath),
+		firstRead:        true,
+		knownAgents:      known,
+		inferStates:      make(map[string]*inferredState),
+		cursorUsage:      newCursorUsageReader(filePath),
+		useCoordinator:   true,
 	}
 }
 
@@ -138,6 +142,10 @@ func (w *JSONLWatcher) Start(catchUp bool) error {
 
 	go w.watchLoop()
 
+	if w.useCoordinator {
+		sharedWatcherCoordinator().register(w)
+	}
+
 	// Auto-complete agents from very old sessions
 	if staleDur > StaleCompleteThreshold {
 		w.staleEmitted = 2
@@ -184,16 +192,30 @@ func (w *JSONLWatcher) SetOnStop(fn func()) {
 }
 
 func (w *JSONLWatcher) watchLoop() {
-	pollTicker := time.NewTicker(200 * time.Millisecond)
 	sweepTicker := time.NewTicker(2 * time.Minute)
-	defer pollTicker.Stop()
 	defer sweepTicker.Stop()
 	defer func() {
+		if w.useCoordinator {
+			sharedWatcherCoordinator().unregister(w)
+		}
 		if w.onStop != nil {
 			w.onStop()
 		}
 	}()
 
+	if w.useCoordinator {
+		for {
+			select {
+			case <-w.done:
+				return
+			case <-sweepTicker.C:
+				w.sweepStale()
+			}
+		}
+	}
+
+	pollTicker := time.NewTicker(200 * time.Millisecond)
+	defer pollTicker.Stop()
 	for {
 		select {
 		case <-w.done:

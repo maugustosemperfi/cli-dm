@@ -2,7 +2,14 @@ import { useEffect, useRef, useCallback, useState } from "react";
 import { Application, Container, Graphics } from "pixi.js";
 import { useGameState } from "../../stores/gameState";
 import type { DAGSnapshot } from "../../protocol/events";
-import type { AgentState } from "../../stores/gameState";
+import type {
+  AgentState,
+  ToolFlowEntry,
+  ErrorPropagation,
+  RoomMetrics,
+  BurnRate,
+  RoomHistory,
+} from "../../stores/gameState";
 import { computeLayout, type NodeWeight } from "./layout";
 import { RoomNode } from "./RoomNode";
 import { AgentSprite, setCharacterRenderer } from "./AgentSprite";
@@ -46,6 +53,24 @@ const Z = {
   dayNight: 100,
 } as const;
 
+interface SceneOverlay {
+  toolFlows: ToolFlowEntry[];
+  errorPropagations: ErrorPropagation[];
+  roomMetrics: Map<string, RoomMetrics>;
+  burnRates: Map<string, BurnRate>;
+  roomHistory: Map<string, RoomHistory>;
+}
+
+function pickSceneOverlay(state: ReturnType<typeof useGameState.getState>): SceneOverlay {
+  return {
+    toolFlows: state.toolFlows,
+    errorPropagations: state.errorPropagations,
+    roomMetrics: state.roomMetrics,
+    burnRates: state.burnRates,
+    roomHistory: state.roomHistory,
+  };
+}
+
 export function DungeonMap() {
   const containerRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -75,17 +100,14 @@ export function DungeonMap() {
   const prevNodeIdsRef = useRef<Set<string> | null>(null);
   const prevTopoKeyRef = useRef<string>("");
   const [error, setError] = useState<string | null>(null);
+  const sceneOverlayRef = useRef<SceneOverlay>(pickSceneOverlay(useGameState.getState()));
+  const syncSceneRef = useRef<(dag: DAGSnapshot, agents: Map<string, AgentState>) => void>(() => {});
 
   const dag = useGameState((s) => s.dag);
   const agents = useGameState((s) => s.agents);
+  const reducedEffects = useGameState((s) => s.reducedEffects);
   const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
-  const toolFlows = useGameState((s) => s.toolFlows);
-  const errorPropagations = useGameState((s) => s.errorPropagations);
-  const activeLayer = useGameState((s) => s.activeLayer);
-  const roomMetrics = useGameState((s) => s.roomMetrics);
-  const roomHistory = useGameState((s) => s.roomHistory);
-  const burnRates = useGameState((s) => s.burnRates);
 
   // Initialize PixiJS — wait for container to have real dimensions
   useEffect(() => {
@@ -372,6 +394,9 @@ export function DungeonMap() {
     (dag: DAGSnapshot, agents: Map<string, AgentState>) => {
       const world = worldRef.current;
       if (!world) return;
+
+      const { toolFlows, errorPropagations, roomMetrics, burnRates, roomHistory } = sceneOverlayRef.current;
+      const activeLayer = useGameState.getState().activeLayer;
 
       // Build weight hints from room metrics for organic sizing
       const nodeWeights: NodeWeight[] = [];
@@ -665,11 +690,11 @@ export function DungeonMap() {
         }
       }
 
-      const MAX_CREATURES = 25;
+      const MAX_CREATURES = useGameState.getState().reducedEffects ? 0 : 25;
 
       // Helper: spawn creatures near an agent
       const spawnCreaturesNear = (x: number, y: number, count: number) => {
-        if (creaturesRef.current.length >= MAX_CREATURES) return;
+        if (MAX_CREATURES === 0 || creaturesRef.current.length >= MAX_CREATURES) return;
         const types: CreatureType[] = ["slime", "bat", "rat"];
         for (let c = 0; c < count; c++) {
           if (creaturesRef.current.length >= MAX_CREATURES) break;
@@ -1058,12 +1083,43 @@ export function DungeonMap() {
         }
       }
     },
-    [selectAgent, toolFlows, errorPropagations, activeLayer, roomMetrics, burnRates, roomHistory]
+    [selectAgent]
   );
+
+  syncSceneRef.current = syncScene;
+
+  useEffect(() => {
+    if (!reducedEffects) return;
+    const world = worldRef.current;
+    if (!world) return;
+    for (const c of creaturesRef.current) {
+      world.removeChild(c);
+      c.destroy();
+    }
+    creaturesRef.current = [];
+  }, [reducedEffects]);
 
   useEffect(() => {
     syncScene(dag, agents);
   }, [dag, agents, syncScene]);
+
+  // Re-sync PixiJS overlays when event-derived state changes without agent/DAG updates
+  useEffect(() => {
+    return useGameState.subscribe((s, prev) => {
+      if (
+        s.toolFlows === prev.toolFlows &&
+        s.errorPropagations === prev.errorPropagations &&
+        s.roomMetrics === prev.roomMetrics &&
+        s.burnRates === prev.burnRates &&
+        s.roomHistory === prev.roomHistory &&
+        s.activeLayer === prev.activeLayer
+      ) {
+        return;
+      }
+      sceneOverlayRef.current = pickSceneOverlay(s);
+      syncSceneRef.current(s.dag, s.agents);
+    });
+  }, []);
 
   const handleMinimapClick = useCallback(
     (worldX: number, worldY: number) => {
@@ -1113,7 +1169,6 @@ export function DungeonMap() {
         dag={dag}
         agents={agents}
         camera={cameraRef.current}
-        roomMetrics={roomMetrics}
         onClickWorld={handleMinimapClick}
       />
     </div>

@@ -279,6 +279,10 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 			ToolName: "__compact__",
 		}
 
+	case "UserPromptSubmit", "Notification":
+		// Low-value hooks — skipped to reduce UI churn during live sessions
+		return nil
+
 	case "PermissionRequest":
 		return &mapper.ToolEvent{
 			Kind:     mapper.ToolStart,
@@ -287,26 +291,6 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 			Input: map[string]any{
 				"tool": stringFromMap(payload, "tool_name"),
 			},
-		}
-
-	case "UserPromptSubmit":
-		return &mapper.ToolEvent{
-			Kind:     mapper.ToolStart,
-			AgentID:  agentID,
-			ToolName: "__user_input__",
-		}
-
-	case "Notification":
-		// Notifications are informational — treat as thinking
-		msg := stringFromMap(payload, "message")
-		if msg == "" {
-			msg = stringFromMap(payload, "notification_type")
-		}
-		return &mapper.ToolEvent{
-			Kind:     mapper.ToolStart,
-			AgentID:  agentID,
-			ToolName: "__responding__",
-			Input:    map[string]any{"text_length": len(msg)},
 		}
 
 	default:

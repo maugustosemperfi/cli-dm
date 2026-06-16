@@ -269,6 +269,7 @@ interface GameState {
   searchQuery: string;
   searchFilters: SearchFilters;
   focusNodeId: string | null;  // set to pan camera to a room
+  reducedEffects: boolean;
 
   // Actions
   handleEvent: (event: GameEvent) => void;
@@ -280,12 +281,137 @@ interface GameState {
   setSearchQuery: (query: string) => void;
   setSearchFilters: (filters: Partial<SearchFilters>) => void;
   focusOnNode: (nodeId: string | null) => void;
+  setReducedEffects: (enabled: boolean) => void;
   getFilteredTranscript: () => TranscriptEntry[];
   getFilteredTimeline: () => TimelineSegment[];
+  clearEvents: () => void;
+  pruneEventsOlderThan: (minutes: number) => number;
 }
 
 const MAX_TOOL_FLOWS = 200;
 const MAX_TRANSCRIPT = 1000;
+
+// --- Batched event reducer (one Zustand set() per incoming event) ---
+interface EventDraft {
+  agents: Map<string, AgentState>;
+  dag: DAGSnapshot;
+  eventLog: EventLogEntry[];
+  transcript: TranscriptEntry[];
+  timeline: TimelineSegment[];
+  toolFlows: ToolFlowEntry[];
+  errorPropagations: ErrorPropagation[];
+  roomMetrics: Map<string, RoomMetrics>;
+  burnRates: Map<string, BurnRate>;
+  roomHistory: Map<string, RoomHistory>;
+  bosses: Map<string, BossState>;
+}
+
+function createEventDraft(state: Pick<GameState, keyof EventDraft>): EventDraft {
+  return {
+    agents: state.agents,
+    dag: state.dag,
+    eventLog: state.eventLog,
+    transcript: state.transcript,
+    timeline: state.timeline,
+    toolFlows: state.toolFlows,
+    errorPropagations: state.errorPropagations,
+    roomMetrics: state.roomMetrics,
+    burnRates: state.burnRates,
+    roomHistory: state.roomHistory,
+    bosses: state.bosses,
+  };
+}
+
+function commitEventDraft(
+  state: Pick<GameState, keyof EventDraft>,
+  draft: EventDraft,
+  set: (partial: Partial<GameState>) => void,
+  saveStats: boolean,
+): void {
+  const patch: Partial<GameState> = {};
+  if (draft.agents !== state.agents) patch.agents = draft.agents;
+  if (draft.dag !== state.dag) patch.dag = draft.dag;
+  if (draft.eventLog !== state.eventLog) patch.eventLog = draft.eventLog;
+  if (draft.transcript !== state.transcript) patch.transcript = draft.transcript;
+  if (draft.timeline !== state.timeline) patch.timeline = draft.timeline;
+  if (draft.toolFlows !== state.toolFlows) patch.toolFlows = draft.toolFlows;
+  if (draft.errorPropagations !== state.errorPropagations) patch.errorPropagations = draft.errorPropagations;
+  if (draft.roomMetrics !== state.roomMetrics) patch.roomMetrics = draft.roomMetrics;
+  if (draft.burnRates !== state.burnRates) patch.burnRates = draft.burnRates;
+  if (draft.roomHistory !== state.roomHistory) patch.roomHistory = draft.roomHistory;
+  if (draft.bosses !== state.bosses) patch.bosses = draft.bosses;
+  if (Object.keys(patch).length === 0) return;
+  set(patch);
+  if (saveStats && patch.agents) savePersistedStats(patch.agents);
+}
+
+function spawnBossOnDraft(
+  draft: EventDraft,
+  type: BossDataType,
+  agentId: string,
+  nodeId: string,
+  reason?: string,
+): void {
+  for (const boss of draft.bosses.values()) {
+    if (boss.nodeId === nodeId && boss.bossType === type && boss.isAlive) return;
+  }
+  const bosses = new Map(draft.bosses);
+  const bossId = `boss_${type}_${nodeId}_${Date.now()}`;
+  bosses.set(bossId, {
+    bossId,
+    bossType: type,
+    name: BOSS_DISPLAY_NAMES[type],
+    maxHP: BOSS_MAX_HP[type],
+    currentHP: BOSS_MAX_HP[type],
+    nodeId,
+    agentId,
+    isAlive: true,
+    participants: [agentId],
+    lootDropped: false,
+    reason,
+    lastDamageTs: 0,
+  });
+  draft.bosses = bosses;
+  soundManager.playBlocked();
+}
+
+function damageBossOnDraft(
+  draft: EventDraft,
+  bossId: string,
+  damage: number,
+  agentId: string,
+): void {
+  const boss = draft.bosses.get(bossId);
+  if (!boss || !boss.isAlive) return;
+  const newHP = Math.max(0, boss.currentHP - damage);
+  const isAlive = newHP > 0;
+  const participants = boss.participants.includes(agentId)
+    ? boss.participants
+    : [...boss.participants, agentId];
+  const bosses = new Map(draft.bosses);
+  bosses.set(bossId, {
+    ...boss,
+    currentHP: newHP,
+    isAlive,
+    participants,
+    lootDropped: !isAlive,
+    lastDamageTs: Date.now(),
+  });
+  draft.bosses = bosses;
+  if (!isAlive) {
+    for (const pid of participants) {
+      const agent = draft.agents.get(pid);
+      if (agent) {
+        const agents = new Map(draft.agents);
+        const bonusXP = Math.round(boss.maxHP * 1.5);
+        const newXP = agent.xp + bonusXP;
+        agents.set(pid, { ...agent, xp: newXP, level: levelFromXP(newXP) });
+        draft.agents = agents;
+      }
+    }
+    soundManager.playComplete();
+  }
+}
 
 // --- localStorage persistence for RPG stats ---
 interface PersistedStats {
@@ -296,6 +422,15 @@ interface PersistedStats {
 }
 
 const STORAGE_KEY = "cli_dm_agent_stats";
+const REDUCED_EFFECTS_KEY = "cli_dm_reduced_effects";
+
+function loadReducedEffects(): boolean {
+  try {
+    return localStorage.getItem(REDUCED_EFFECTS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function loadPersistedStats(): Map<string, PersistedStats> {
   try {
@@ -342,6 +477,7 @@ export const useGameState = create<GameState>((set, get) => ({
   searchQuery: "",
   searchFilters: { agentIds: [], actionTypes: [], timeRange: "all" },
   focusNodeId: null,
+  reducedEffects: loadReducedEffects(),
 
   spawnBoss: (type, agentId, nodeId, reason) => {
     const state = get();
@@ -420,6 +556,13 @@ export const useGameState = create<GameState>((set, get) => ({
 
   focusOnNode: (nodeId) => set({ focusNodeId: nodeId }),
 
+  setReducedEffects: (enabled) => {
+    try {
+      localStorage.setItem(REDUCED_EFFECTS_KEY, enabled ? "1" : "0");
+    } catch { /* ignore */ }
+    set({ reducedEffects: enabled });
+  },
+
   getFilteredTranscript: () => {
     const { transcript, searchQuery, searchFilters } = get();
     const q = searchQuery.toLowerCase().trim();
@@ -454,31 +597,115 @@ export const useGameState = create<GameState>((set, get) => ({
     });
   },
 
+  clearEvents: () => {
+    set({
+      eventLog: [],
+      toolFlows: [],
+      transcript: [],
+      timeline: [],
+      errorPropagations: [],
+      roomMetrics: new Map(),
+      burnRates: new Map(),
+      roomHistory: new Map(),
+    });
+  },
+
+  pruneEventsOlderThan: (minutes) => {
+    if (minutes <= 0) return 0;
+    const state = get();
+    const cutoff = Date.now() - minutes * 60_000;
+    let removed = 0;
+
+    const countRemoved = (before: number, after: number) => {
+      removed += before - after;
+    };
+
+    const eventLog = state.eventLog.filter((e) => e.ts >= cutoff);
+    countRemoved(state.eventLog.length, eventLog.length);
+
+    const transcript = state.transcript.filter((e) => e.ts >= cutoff);
+    countRemoved(state.transcript.length, transcript.length);
+
+    const toolFlows = state.toolFlows.filter((e) => e.ts >= cutoff);
+    countRemoved(state.toolFlows.length, toolFlows.length);
+
+    const errorPropagations = state.errorPropagations.filter((e) => e.ts >= cutoff);
+    countRemoved(state.errorPropagations.length, errorPropagations.length);
+
+    const timeline = state.timeline.filter(
+      (s) => s.endTs === undefined || s.endTs >= cutoff || s.startTs >= cutoff
+    );
+    countRemoved(state.timeline.length, timeline.length);
+
+    const roomMetrics = new Map(state.roomMetrics);
+    for (const [nodeId, m] of roomMetrics) {
+      if (m.lastActionTs > 0 && m.lastActionTs < cutoff) roomMetrics.delete(nodeId);
+    }
+
+    const burnRates = new Map(state.burnRates);
+    for (const [nodeId, br] of burnRates) {
+      const tokenHistory = br.tokenHistory.filter((h) => h.ts >= cutoff);
+      if (tokenHistory.length === 0) {
+        burnRates.delete(nodeId);
+      } else {
+        burnRates.set(nodeId, { ...br, tokenHistory });
+      }
+    }
+
+    const roomHistory = new Map(state.roomHistory);
+    for (const [nodeId, rh] of roomHistory) {
+      if (rh.lastActionTs > 0 && rh.lastActionTs < cutoff) roomHistory.delete(nodeId);
+    }
+
+    const agents = new Map(state.agents);
+    for (const [id, a] of agents) {
+      if (a.isComplete && a.completedAt && a.completedAt < cutoff) {
+        agents.delete(id);
+        removed++;
+      }
+    }
+
+    set({
+      eventLog,
+      transcript,
+      toolFlows,
+      errorPropagations,
+      timeline,
+      roomMetrics,
+      burnRates,
+      roomHistory,
+      agents,
+    });
+    return removed;
+  },
+
   handleEvent: (event) => {
     const state = get();
+    const ts = "ts" in event ? (event.ts ?? Date.now()) : Date.now();
+    const draft = createEventDraft(state);
+    let saveStats = false;
 
     const pushLog = (entry: Omit<EventLogEntry, "ts">) => {
-      const log = [...state.eventLog, { ...entry, ts: event.ts ?? Date.now() }];
-      if (log.length > MAX_LOG_ENTRIES) log.splice(0, log.length - MAX_LOG_ENTRIES);
-      set({ eventLog: log });
+      draft.eventLog = [...draft.eventLog, { ...entry, ts }];
+      if (draft.eventLog.length > MAX_LOG_ENTRIES) {
+        draft.eventLog = draft.eventLog.slice(-MAX_LOG_ENTRIES);
+      }
     };
 
     const pushTranscript = (entry: Omit<TranscriptEntry, "ts">) => {
-      const transcript = [...state.transcript, { ...entry, ts: event.ts ?? Date.now() }];
-      if (transcript.length > MAX_TRANSCRIPT) transcript.splice(0, transcript.length - MAX_TRANSCRIPT);
-      set({ transcript });
+      draft.transcript = [...draft.transcript, { ...entry, ts }];
+      if (draft.transcript.length > MAX_TRANSCRIPT) {
+        draft.transcript = draft.transcript.slice(-MAX_TRANSCRIPT);
+      }
     };
 
-    // Find which DAG node an agent is assigned to
-    const agentNodeId = (agentId: string): string | undefined => {
-      return state.dag.nodes.find((n) => n.assignee === agentId)?.nodeId;
-    };
+    const agentNodeId = (agentId: string): string | undefined =>
+      draft.dag.nodes.find((n) => n.assignee === agentId)?.nodeId;
 
-    // Update per-room metrics for overlay layers
     const updateRoomMetrics = (agentId: string, updater: (m: RoomMetrics) => void) => {
       const nodeId = agentNodeId(agentId);
       if (!nodeId) return;
-      const metrics = new Map(get().roomMetrics);
+      const metrics = new Map(draft.roomMetrics);
       const existing = metrics.get(nodeId) ?? {
         totalTokens: 0, totalCostUSD: 0, errorCount: 0,
         actionCount: 0, lastActionTs: 0, lastErrorTs: 0,
@@ -486,7 +713,7 @@ export const useGameState = create<GameState>((set, get) => ({
       const updated = { ...existing };
       updater(updated);
       metrics.set(nodeId, updated);
-      set({ roomMetrics: metrics });
+      draft.roomMetrics = metrics;
     };
 
     switch (event.type) {
@@ -516,12 +743,13 @@ export const useGameState = create<GameState>((set, get) => ({
             completedAt: existing?.completedAt,
           });
         }
-        set({ agents, dag: event.dag });
+        draft.agents = agents;
+        draft.dag = event.dag;
         break;
       }
 
       case "agent.spawn": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         agents.set(event.agentId, {
           agentId: event.agentId,
           name: event.name,
@@ -547,14 +775,14 @@ export const useGameState = create<GameState>((set, get) => ({
           totalTests: 0,
           actionProfile: { recentActions: [], classType: 'paladin', classChangedAt: 0 },
         });
-        set({ agents });
+        draft.agents = agents;
         pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
         pushTranscript({ agentId: event.agentId, agentName: event.name, agentRole: event.role, kind: "spawn", message: `joined the dungeon as ${event.role}` });
         break;
       }
 
       case "agent.complete": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           agents.set(event.agentId, {
@@ -564,14 +792,11 @@ export const useGameState = create<GameState>((set, get) => ({
             currentAction: "idle",
             completedAt: event.ts ?? Date.now(),
           });
-          set({ agents });
-          // Close any open timeline segment
-          const tl = state.timeline;
+          draft.agents = agents;
+          const tl = [...draft.timeline];
           const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) {
-            openSeg.endTs = event.ts ?? Date.now();
-            set({ timeline: [...tl] });
-          }
+          if (openSeg) openSeg.endTs = ts;
+          draft.timeline = tl;
           soundManager.playComplete();
           pushLog({ category: "complete", agentName: agent.name, agentRole: agent.role, message: `completed (exit ${event.exitCode})` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "complete", message: `completed (exit ${event.exitCode})` });
@@ -581,14 +806,14 @@ export const useGameState = create<GameState>((set, get) => ({
       }
 
       case "agent.error": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           agents.set(event.agentId, {
             ...agent,
             errorCount: (agent.errorCount ?? 0) + 1,
           });
-          set({ agents });
+          draft.agents = agents;
           soundManager.playError();
           pushLog({ category: "error", agentName: agent.name, agentRole: agent.role, message: event.message ?? "hit an error" });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "error", message: event.message ?? "hit an error" });
@@ -605,12 +830,12 @@ export const useGameState = create<GameState>((set, get) => ({
           if (srcNode) {
             const affected: string[] = [srcNode];
             // Find downstream nodes via DAG edges
-            for (const edge of state.dag.edges) {
+            for (const edge of draft.dag.edges) {
               if (edge.from === srcNode) affected.push(edge.to);
             }
             // Decay old propagations and add new one
-            const now = event.ts ?? Date.now();
-            const props = state.errorPropagations
+            const now = ts;
+            const props = draft.errorPropagations
               .map((p) => ({ ...p, intensity: p.intensity * Math.max(0, 1 - (now - p.ts) / 30000) }))
               .filter((p) => p.intensity > 0.01);
             props.push({
@@ -621,24 +846,23 @@ export const useGameState = create<GameState>((set, get) => ({
               affectedNodes: affected,
             });
             if (props.length > 20) props.splice(0, props.length - 20);
-            set({ errorPropagations: props });
+            draft.errorPropagations = props;
           }
 
-          // Room history: track error
           const errNodeId = agentNodeId(event.agentId);
           if (errNodeId) {
-            const roomHistory = new Map(state.roomHistory);
+            const roomHistory = new Map(draft.roomHistory);
             const rh = { ...(roomHistory.get(errNodeId) ?? DEFAULT_ROOM_HISTORY) };
             rh.errorCount++;
             roomHistory.set(errNodeId, rh);
-            set({ roomHistory });
+            draft.roomHistory = roomHistory;
           }
         }
         break;
       }
 
       case "action.start": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           const prevAction = agent.currentAction;
@@ -681,64 +905,59 @@ export const useGameState = create<GameState>((set, get) => ({
             lastDiscoveredPath,
             visitedRooms,
           });
-          set({ agents });
+          draft.agents = agents;
 
-          // Room metrics: track action count and recency
           updateRoomMetrics(event.agentId, (m) => {
             m.actionCount++;
-            m.lastActionTs = event.ts ?? Date.now();
+            m.lastActionTs = ts;
           });
 
-          // Tool flow: track transition from previous action's node
           const currNodeId = agentNodeId(event.agentId);
           if (currNodeId && prevAction !== "idle" && prevAction !== event.action) {
-            const flows = [...state.toolFlows, {
+            const flows = [...draft.toolFlows, {
               fromNodeId: currNodeId,
-              toNodeId: currNodeId, // same room, different action phase
+              toNodeId: currNodeId,
               action: event.action,
               agentRole: agent.role,
-              ts: event.ts ?? Date.now(),
+              ts,
               intensity: 1.0,
             }];
             if (flows.length > MAX_TOOL_FLOWS) flows.splice(0, flows.length - MAX_TOOL_FLOWS);
-            set({ toolFlows: flows });
+            draft.toolFlows = flows;
           }
 
-          // Timeline: close previous segment, open new one
-          const tl = [...state.timeline];
+          const tl = [...draft.timeline];
           const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) openSeg.endTs = event.ts ?? Date.now();
+          if (openSeg) openSeg.endTs = ts;
           tl.push({
             agentId: event.agentId,
             agentName: agent.name,
             agentRole: agent.role,
             action: event.action,
             detail: event.detail,
-            startTs: event.ts ?? Date.now(),
+            startTs: ts,
           });
-          set({ timeline: tl });
+          draft.timeline = tl;
 
-          // Room history: track action start time
           const startNodeId = agentNodeId(event.agentId);
           if (startNodeId) {
-            const roomHistory = new Map(state.roomHistory);
+            const roomHistory = new Map(draft.roomHistory);
             const rh = { ...(roomHistory.get(startNodeId) ?? DEFAULT_ROOM_HISTORY) };
-            rh.lastActionTs = event.ts ?? Date.now();
+            rh.lastActionTs = ts;
             roomHistory.set(startNodeId, rh);
-            set({ roomHistory });
+            draft.roomHistory = roomHistory;
           }
 
           const detail = event.detail ? `: ${event.detail}` : "";
           pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `started ${event.action}${detail}` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_start", action: event.action, detail: event.detail });
 
-          // Boss spawning based on action type
           const bossSpawnNode = agentNodeId(event.agentId);
           if (bossSpawnNode) {
             if (event.action === "test") {
-              get().spawnBoss('test_hydra', event.agentId, bossSpawnNode);
+              spawnBossOnDraft(draft, 'test_hydra', event.agentId, bossSpawnNode);
             } else if (event.action === "build") {
-              get().spawnBoss('forge_golem', event.agentId, bossSpawnNode);
+              spawnBossOnDraft(draft, 'forge_golem', event.agentId, bossSpawnNode);
             }
           }
         }
@@ -746,7 +965,7 @@ export const useGameState = create<GameState>((set, get) => ({
       }
 
       case "action.end": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           // Award XP for completed action
@@ -784,13 +1003,12 @@ export const useGameState = create<GameState>((set, get) => ({
             totalTests,
             actionProfile,
           });
-          set({ agents });
-          savePersistedStats(agents);
+          draft.agents = agents;
+          saveStats = true;
 
-          // Boss damage — find active boss in this agent's room
           const bossNodeId = agentNodeId(event.agentId);
           if (bossNodeId) {
-            for (const boss of get().bosses.values()) {
+            for (const boss of draft.bosses.values()) {
               if (!boss.isAlive) continue;
               if (boss.nodeId === bossNodeId || boss.bossType === 'siege_dragon') {
                 let damage = 0;
@@ -802,37 +1020,32 @@ export const useGameState = create<GameState>((set, get) => ({
                   damage = 10 + Math.floor(Math.random() * 10);
                 }
                 if (damage > 0) {
-                  get().damageBoss(boss.bossId, damage, event.agentId);
+                  damageBossOnDraft(draft, boss.bossId, damage, event.agentId);
                 }
               }
             }
           }
 
-          // Room history: track completed action type
           const endNodeId = agentNodeId(event.agentId);
           if (endNodeId) {
-            const roomHistory = new Map(state.roomHistory);
+            const roomHistory = new Map(draft.roomHistory);
             const rh = { ...(roomHistory.get(endNodeId) ?? DEFAULT_ROOM_HISTORY) };
             if (agent.currentAction === "edit") rh.editCount++;
             if (agent.currentAction === "read") rh.readCount++;
             if (agent.currentAction === "test") rh.testCount++;
             if (agent.currentAction === "build") rh.buildCount++;
-            rh.lastActionTs = event.ts ?? Date.now();
+            rh.lastActionTs = ts;
             roomHistory.set(endNodeId, rh);
-            set({ roomHistory });
+            draft.roomHistory = roomHistory;
           }
 
-          // Timeline: close open segment
-          const tl = state.timeline;
+          const tl = [...draft.timeline];
           const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) {
-            openSeg.endTs = event.ts ?? Date.now();
-            set({ timeline: [...tl] });
-          }
+          if (openSeg) openSeg.endTs = ts;
+          draft.timeline = tl;
 
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_end", action: agent.currentAction, detail: event.detail });
 
-          // Level up notification + sound
           if (newLevel > agent.level) {
             pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `LEVEL UP! Now level ${newLevel}` });
             notifyBrowser(`${agent.name} leveled up to ${newLevel}!`, "level-up");
@@ -843,7 +1056,7 @@ export const useGameState = create<GameState>((set, get) => ({
       }
 
       case "agent.stats": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           const tokensAdded = event.tokens ?? 0;
@@ -853,41 +1066,37 @@ export const useGameState = create<GameState>((set, get) => ({
             tokens: agent.tokens + tokensAdded,
             gold: agent.gold + costAdded * 100, // cents
           });
-          set({ agents });
-          savePersistedStats(agents);
+          draft.agents = agents;
+          saveStats = true;
 
-          // Room metrics: track tokens and cost
           updateRoomMetrics(event.agentId, (m) => {
             m.totalTokens += tokensAdded;
             m.totalCostUSD += costAdded;
           });
 
-          // Room history: track tokens
           const statsNodeId = agentNodeId(event.agentId);
           if (statsNodeId && tokensAdded > 0) {
-            const roomHistory = new Map(state.roomHistory);
+            const roomHistory = new Map(draft.roomHistory);
             const rh = { ...(roomHistory.get(statsNodeId) ?? DEFAULT_ROOM_HISTORY) };
             rh.totalTokens += tokensAdded;
             roomHistory.set(statsNodeId, rh);
-            set({ roomHistory });
+            draft.roomHistory = roomHistory;
           }
 
-          // Burn rate tracking per node
           if (tokensAdded > 0) {
             const nodeId = agentNodeId(event.agentId);
             if (nodeId) {
-              const burnRates = new Map(state.burnRates);
+              const burnRates = new Map(draft.burnRates);
               const existing = burnRates.get(nodeId) ?? {
                 totalTokens: 0, totalCostUSD: 0, tokenHistory: [], ratePerMin: 0,
               };
-              const now = event.ts ?? Date.now();
               const estimatedCost = costAdded > 0
                 ? costAdded
-                : tokensAdded * 9 / 1_000_000; // rough average estimate
+                : tokensAdded * 9 / 1_000_000;
               const history = [
                 ...existing.tokenHistory,
-                { ts: now, tokens: tokensAdded },
-              ].filter((h) => now - h.ts < 60_000); // keep last 60s
+                { ts, tokens: tokensAdded },
+              ].filter((h) => ts - h.ts < 60_000);
               const ratePerMin = history.reduce((s, h) => s + h.tokens, 0);
               burnRates.set(nodeId, {
                 totalTokens: existing.totalTokens + tokensAdded,
@@ -895,7 +1104,7 @@ export const useGameState = create<GameState>((set, get) => ({
                 tokenHistory: history,
                 ratePerMin,
               });
-              set({ burnRates });
+              draft.burnRates = burnRates;
             }
           }
         }
@@ -903,7 +1112,7 @@ export const useGameState = create<GameState>((set, get) => ({
       }
 
       case "blocker.hit": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           agents.set(event.agentId, {
@@ -912,23 +1121,22 @@ export const useGameState = create<GameState>((set, get) => ({
             currentAction: "blocked" as ActionType,
             currentDetail: event.detail,
           });
-          set({ agents });
+          draft.agents = agents;
           soundManager.playBlocked();
           pushLog({ category: "blocked", agentName: agent.name, agentRole: agent.role, message: `blocked: ${event.detail ?? "unknown reason"}` });
           pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "blocked", detail: event.detail ?? "unknown reason" });
           notifyBrowser(`${agent.name} is blocked!`, "blocked-" + event.agentId);
 
-          // Spawn gate_keeper boss for blocker
           const blockerNode = agentNodeId(event.agentId);
           if (blockerNode) {
-            get().spawnBoss('gate_keeper', event.agentId, blockerNode, event.detail);
+            spawnBossOnDraft(draft, 'gate_keeper', event.agentId, blockerNode, event.detail);
           }
         }
         break;
       }
 
       case "blocker.resolve": {
-        const agents = new Map(state.agents);
+        const agents = new Map(draft.agents);
         const agent = agents.get(event.agentId);
         if (agent) {
           agents.set(event.agentId, {
@@ -936,15 +1144,14 @@ export const useGameState = create<GameState>((set, get) => ({
             isBlocked: false,
             currentAction: "idle" as ActionType,
           });
-          set({ agents });
+          draft.agents = agents;
           pushLog({ category: "resolve", agentName: agent.name, agentRole: agent.role, message: "blocker resolved" });
 
-          // Kill gate_keeper boss when blocker resolves
           const resolveNode = agentNodeId(event.agentId);
           if (resolveNode) {
-            for (const boss of get().bosses.values()) {
+            for (const boss of draft.bosses.values()) {
               if (boss.bossType === 'gate_keeper' && boss.nodeId === resolveNode && boss.isAlive) {
-                get().damageBoss(boss.bossId, boss.currentHP, event.agentId);
+                damageBossOnDraft(draft, boss.bossId, boss.currentHP, event.agentId);
               }
             }
           }
@@ -953,7 +1160,7 @@ export const useGameState = create<GameState>((set, get) => ({
       }
 
       case "dag.node.add": {
-        const dag = { ...state.dag };
+        const dag = { ...draft.dag };
         dag.nodes = [
           ...dag.nodes,
           {
@@ -963,66 +1170,65 @@ export const useGameState = create<GameState>((set, get) => ({
             assignee: event.assignee,
           },
         ];
-        set({ dag });
+        draft.dag = dag;
         break;
       }
 
       case "dag.node.status": {
-        const dag = { ...state.dag };
+        const dag = { ...draft.dag };
         const node = dag.nodes.find((n) => n.nodeId === event.nodeId);
         dag.nodes = dag.nodes.map((n) =>
           n.nodeId === event.nodeId ? { ...n, status: event.status } : n
         );
-        set({ dag });
+        draft.dag = dag;
         pushLog({ category: "dag", message: `Task '${node?.label ?? event.nodeId}' → ${event.status}` });
 
-        // Room history: track completion
         if (event.status === "completed") {
-          const roomHistory = new Map(state.roomHistory);
+          const roomHistory = new Map(draft.roomHistory);
           const rh = { ...(roomHistory.get(event.nodeId) ?? DEFAULT_ROOM_HISTORY) };
           rh.completedSuccessfully = true;
           roomHistory.set(event.nodeId, rh);
-          set({ roomHistory });
+          draft.roomHistory = roomHistory;
         }
         break;
       }
 
       case "dag.edge.add": {
-        const dag = { ...state.dag };
+        const dag = { ...draft.dag };
         dag.edges = [...dag.edges, { from: event.from, to: event.to }];
-        set({ dag });
+        draft.dag = dag;
         break;
       }
 
       case "raw.stdout":
       case "raw.stderr": {
-        // Decode base64 and push as transcript entries
         try {
           const decoded = atob(event.data);
-          // Strip ANSI escape codes for display
           const clean = decoded.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim();
           if (clean.length === 0) break;
 
-          // Split into lines and push each as a transcript entry
           const lines = clean.split(/\r?\n/).filter(l => l.trim().length > 0);
-          const agent = state.agents.get(event.agentId);
-          const newEntries = lines.slice(0, 5).map(line => ({  // cap at 5 lines per chunk
-            ts: event.ts ?? Date.now(),
+          const agent = draft.agents.get(event.agentId);
+          const newEntries = lines.slice(0, 5).map(line => ({
+            ts,
             agentId: event.agentId,
             agentName: agent?.name,
             agentRole: agent?.role,
-            kind: "tool_end" as const,  // use tool_end kind for dimmed styling
+            kind: "tool_end" as const,
             action: event.type === "raw.stderr" ? "stderr" : "stdout",
-            detail: line.slice(0, 200),  // truncate long lines
+            detail: line.slice(0, 200),
           }));
 
-          const transcript = [...state.transcript, ...newEntries];
-          if (transcript.length > MAX_TRANSCRIPT) transcript.splice(0, transcript.length - MAX_TRANSCRIPT);
-          set({ transcript });
+          draft.transcript = [...draft.transcript, ...newEntries];
+          if (draft.transcript.length > MAX_TRANSCRIPT) {
+            draft.transcript = draft.transcript.slice(-MAX_TRANSCRIPT);
+          }
         } catch { /* ignore decode errors */ }
         break;
       }
     }
+
+    commitEventDraft(state, draft, set, saveStats);
   },
 }));
 
@@ -1034,22 +1240,26 @@ export const useGameState = create<GameState>((set, get) => ({
 // stats are preserved even though the live-session entry is removed.
 const COMPLETED_RETENTION_MS = 30 * 60_000;
 const RETENTION_SWEEP_INTERVAL_MS = 60_000;
+const AUTO_PRUNE_INTERVAL_MS = 5 * 60_000;
+const AUTO_PRUNE_AGE_MINUTES = 30;
 
 if (typeof window !== "undefined") {
   setInterval(() => {
     const { agents } = useGameState.getState();
     const now = Date.now();
-    let evicted = 0;
     let next: Map<string, AgentState> | null = null;
     for (const [id, a] of agents) {
       if (a.isComplete && a.completedAt && now - a.completedAt > COMPLETED_RETENTION_MS) {
         if (!next) next = new Map(agents);
         next.delete(id);
-        evicted++;
       }
     }
     if (next) {
       useGameState.setState({ agents: next });
     }
   }, RETENTION_SWEEP_INTERVAL_MS);
+
+  setInterval(() => {
+    useGameState.getState().pruneEventsOlderThan(AUTO_PRUNE_AGE_MINUTES);
+  }, AUTO_PRUNE_INTERVAL_MS);
 }
