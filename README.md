@@ -4,6 +4,8 @@ AI Agent Dungeon Master: a live dungeon map for Claude Code and parallel agent w
 
 `cli-dm` watches agent activity and turns it into a small RPG interface. Agents become characters. Tasks become quest nodes. Blockers become doors and encounters. Claude Code JSONL sessions become maps you can watch as they unfold.
 
+![CLI DM dungeon map UI with agents, quest nodes, cost tracking, and a live event feed](Screenshot%202026-06-16%20at%2007.33.37.png)
+
 ## What it does
 
 - Spawns local agent commands through a PTY.
