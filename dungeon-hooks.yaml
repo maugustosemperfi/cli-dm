@@ -22,6 +22,15 @@ agents:
     source: hooks
     task: "Active Session"
 
+  # Receives live events from a running Cursor session via cursor-dm-relay.py.
+  # Start the relay with: make cursor-relay  (in a separate terminal)
+  - name: "Cursor Agent"
+    role: mage
+    source: hooks
+    task: "Cursor Session"
+
 sessions:
-  enabled: true
+  # Disabled during live dev — every hook event was synced to disk and added I/O overhead.
+  # Set enabled: true when you need session replay via `cli-dm sessions show`.
+  enabled: false
   retention_days: 30

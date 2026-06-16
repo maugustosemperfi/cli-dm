@@ -1,4 +1,4 @@
-.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go clean run test test-mcp
+.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go cursor-relay clean run test test-mcp
 
 # Default target
 build: build-go build-web
@@ -62,6 +62,12 @@ dev-hooks:
 
 dev-hooks-go:
 	go run ./cmd/cli-dm run --config dungeon-hooks.yaml
+
+# Cursor live relay — tails the latest Cursor JSONL and pushes tool events to cli-dm hooks.
+# Run this in a separate terminal while cli-dm is running with make dev-hooks.
+# Requires CLI_DM_HOOK_TOKEN to match hooks_auth in dungeon-hooks.yaml.
+cursor-relay:
+	python3 scripts/cursor-dm-relay.py --project .
 
 # Watch all projects under ~/dev/nu/ with active Claude Code/Cursor sessions
 dev-watch:
