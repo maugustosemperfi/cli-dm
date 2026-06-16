@@ -1,4 +1,4 @@
-.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go cursor-relay clean run test test-mcp
+.PHONY: build build-go build-web dev dev-unified-go dev-demo dev-demo-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go cursor-relay clean run test test-mcp
 
 # Default target
 build: build-go build-web
@@ -11,15 +11,27 @@ build-go:
 build-web:
 	cd web && npm run build
 
-# Development mode: run Go server + Vite dev server concurrently
+# Default: unified mode — Claude Code (live hooks) + Cursor/Codex/etc (JSONL auto-discovery).
+# Requires: export CLI_DM_HOOK_TOKEN=dungeon-live-2026
 dev:
-	@echo "Starting CLI_DM in dev mode..."
+	@echo "Starting CLI_DM (unified — hooks + watch)..."
 	@echo "  Go backend: http://localhost:8420"
 	@echo "  Vite dev:   http://localhost:5173"
 	@echo ""
-	@$(MAKE) dev-go & $(MAKE) dev-web & wait
+	@$(MAKE) dev-unified-go & $(MAKE) dev-web & wait
 
-dev-go:
+dev-unified-go:
+	go run ./cmd/cli-dm run --config dungeon-unified.yaml
+
+# Legacy: synthetic PTY agents (demo/offline use)
+dev-demo:
+	@echo "Starting CLI_DM in demo mode..."
+	@echo "  Go backend: http://localhost:8420"
+	@echo "  Vite dev:   http://localhost:5173"
+	@echo ""
+	@$(MAKE) dev-demo-go & $(MAKE) dev-web & wait
+
+dev-demo-go:
 	go run ./cmd/cli-dm run \
 		--agent "bash -c 'echo \"=== Blue Fighter: Refactoring Auth ===\"; for i in $$(seq 1 30); do echo \"[$$i/30] Reading src/auth/handler.go...\"; sleep 1; echo \"  Editing line $$((i * 3))...\"; sleep 0.5; done; echo \"git commit -m fix-auth\"; echo Done!'" \
 		--agent "bash -c 'echo \"=== Red Rogue: Upgrading Types ===\"; for i in $$(seq 1 25); do echo \"[$$i/25] Processing types/index.ts...\"; sleep 1.2; if [ $$i -eq 12 ]; then echo \"Error: type mismatch at line 42\" >&2; sleep 2; echo \"  Retrying...\"; fi; done; echo Done!'" \

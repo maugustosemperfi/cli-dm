@@ -1,0 +1,31 @@
+# One command to rule them all.
+#
+# - Claude Code   → live events via hooks (wired in ~/.claude/settings.json)
+# - Cursor        → JSONL tailed automatically from ~/.cursor/projects/
+# - Codex / any JSONL-based agent → auto-discovered under watch_dir
+# - Any tool using the hooks protocol → POST to http://localhost:8420/api/hooks
+#
+# Usage:
+#   export CLI_DM_HOOK_TOKEN=dungeon-live-2026
+#   make dev
+
+adapter: claude
+port: 8420
+hooks_auth: "dungeon-live-2026"
+
+# Auto-discover every Claude Code + Cursor session active in the last 24h
+# under this directory. Each project gets its own character on the map.
+watch_dir: "~/dev/nu/"
+watch_age: "24h"
+
+agents:
+  # Receives live Claude Code events via the hooks relay in settings.json.
+  # Any other tool using scripts/cli-dm-hook.sh lands here too.
+  - name: "Claude Code"
+    role: rogue
+    source: hooks
+    task: "Live Session"
+
+sessions:
+  enabled: false
+  retention_days: 30
