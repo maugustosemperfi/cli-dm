@@ -1,0 +1,41 @@
+[project]
+name = "cli-dm-mcp"
+version = "0.1.0"
+description = "cli-dm dungeon state as an MCP server — read-only control plane"
+authors = [
+    { name = "Marcos Augusto", email = "marcos.augusto@nubank.com.br" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.scripts]
+cli-dm-mcp = "cli_dm_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+]

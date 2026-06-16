@@ -1,4 +1,4 @@
-.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go clean run test
+.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go clean run test test-mcp
 
 # Default target
 build: build-go build-web
@@ -79,13 +79,16 @@ run: build-go
 	./bin/cli-dm run $(ARGS)
 
 # Tests
-test: test-go test-web
+test: test-go test-web test-mcp
 
 test-go:
 	go test ./... -v
 
 test-web:
 	cd web && npx tsc --noEmit
+
+test-mcp:
+	cd mcp && UV_INDEX=https://pypi.org/simple/ uv run pytest -q
 
 # Clean build artifacts
 clean:

@@ -178,6 +178,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("either --config, --resume, or at least one --agent flag is required")
 	}
 
+	hooksAuth := ""
+	if fileCfg != nil {
+		hooksAuth = fileCfg.HooksAuth
+	}
+
 	// Initialize DAG
 	taskGraph := dag.New()
 
@@ -813,6 +818,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 		mux.Handle("/api/hooks/register", hookReceiver.RegisterHandler())
 		logger.Info("hook receiver mounted", "endpoint", "/api/hooks")
 	}
+
+	// Read-only snapshot endpoint — serves the current StateSnapshot as JSON
+	mux.Handle("/api/snapshot", server.NewSnapshotHandler(buildSnapshot, hooksAuth))
+	logger.Info("snapshot endpoint mounted", "endpoint", "/api/snapshot")
 
 	// Serve static files from web/dist if it exists
 	exePath, _ := os.Executable()
