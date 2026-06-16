@@ -31,8 +31,10 @@ if [ -n "$CLI_DM_TOKEN" ]; then
   auth_args=(-H "Authorization: Bearer ${CLI_DM_TOKEN}")
 fi
 
-# POST async (don't block Claude Code)
+# POST async — fire-and-forget, short timeouts so zombies never linger
 curl -s -X POST \
+  --max-time 2 \
+  --connect-timeout 1 \
   "${CLI_DM_URL}/api/hooks" \
   -H "Content-Type: application/json" \
   "${auth_args[@]}" \

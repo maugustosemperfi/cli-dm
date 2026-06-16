@@ -1,4 +1,4 @@
-.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go clean run test
+.PHONY: build build-go build-web dev dev-go dev-web dev-config dev-config-go dev-hooks dev-hooks-go clean run test
 
 # Default target
 build: build-go build-web
@@ -49,6 +49,19 @@ dev-live:
 
 dev-live-go:
 	go run ./cmd/cli-dm run --config examples/dungeon-live.yaml
+
+# Live hook telemetry — lights up in real time from a running Claude Code session.
+# Requires CLI_DM_HOOK_TOKEN env var to match hooks_auth in dungeon-hooks.yaml.
+# Example: export CLI_DM_HOOK_TOKEN=dungeon-live-2026 && make dev-hooks
+dev-hooks:
+	@echo "Starting CLI_DM with live hook telemetry..."
+	@echo "  Go backend: http://localhost:8420"
+	@echo "  Vite dev:   http://localhost:5173"
+	@echo ""
+	@$(MAKE) dev-hooks-go & $(MAKE) dev-web & wait
+
+dev-hooks-go:
+	go run ./cmd/cli-dm run --config dungeon-hooks.yaml
 
 # Watch all projects under ~/dev/nu/ with active Claude Code/Cursor sessions
 dev-watch:

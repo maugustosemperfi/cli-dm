@@ -1,0 +1,27 @@
+# Live hook telemetry — receives real-time events from a running Claude Code session.
+#
+# Usage:
+#   export CLI_DM_HOOK_TOKEN=dungeon-live-2026
+#   make dev-watch CONFIG=dungeon-hooks.yaml
+#   (or: go run ./cmd/cli-dm -config dungeon-hooks.yaml)
+#
+# Then open http://localhost:8420 and start any Claude Code session — it lights up live.
+#
+# Hook token must match CLI_DM_HOOK_TOKEN in your environment (used by scripts/cli-dm-hook.sh).
+# hooks_auth in this file and CLI_DM_HOOK_TOKEN must be identical.
+
+adapter: claude
+port: 8420
+hooks_auth: "dungeon-live-2026"
+
+agents:
+  # Receives live events from your interactive Claude Code session via hooks.
+  # The agent appears and animates as you use tools in any Claude Code terminal.
+  - name: "Live Session"
+    role: rogue
+    source: hooks
+    task: "Active Session"
+
+sessions:
+  enabled: true
+  retention_days: 30
