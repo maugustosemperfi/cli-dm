@@ -171,6 +171,7 @@ type DiscoveredProject struct {
 	ProjectName string    // basename (e.g. "mini-meta-repo")
 	SessionPath string    // path to the most recent JSONL file
 	ModTime     time.Time // last modified time of the JSONL file
+	IsCursor    bool      // true when the session came from ~/.cursor/projects/
 }
 
 // DiscoverProjectsInDir scans a parent directory for subdirectories that have
@@ -265,6 +266,7 @@ func discoverProjectsFromSessionRoots(root, encodedPrefix, absParent string, max
 			ProjectName: projectName,
 			SessionPath: sessions[0].Path,
 			ModTime:     sessions[0].ModTime,
+			IsCursor:    cursor,
 		})
 	}
 	return results, nil

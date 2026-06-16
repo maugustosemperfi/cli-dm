@@ -11,14 +11,14 @@ build-go:
 build-web:
 	cd web && npm run build
 
-# Default: unified mode — Claude Code (live hooks) + Cursor/Codex/etc (JSONL auto-discovery).
+# Default: everything — Claude Code live (hooks), Cursor live (relay), all other JSONL tools (watch).
 # Requires: export CLI_DM_HOOK_TOKEN=dungeon-live-2026
 dev:
-	@echo "Starting CLI_DM (unified — hooks + watch)..."
+	@echo "Starting CLI_DM (unified — hooks + Cursor relay + watch)..."
 	@echo "  Go backend: http://localhost:8420"
 	@echo "  Vite dev:   http://localhost:5173"
 	@echo ""
-	@$(MAKE) dev-unified-go & $(MAKE) dev-web & wait
+	@$(MAKE) dev-unified-go & $(MAKE) dev-web & $(MAKE) cursor-relay & wait
 
 dev-unified-go:
 	go run ./cmd/cli-dm run --config dungeon-unified.yaml

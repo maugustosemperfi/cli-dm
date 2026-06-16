@@ -225,41 +225,42 @@ def main() -> None:
             i += 1
 
     if explicit_path:
-        path = explicit_path
-    else:
-        # Wait up to 30s for a session to appear (Cursor may not have started yet)
-        path = None
-        deadline = time.time() + 30
-        while path is None and time.time() < deadline:
-            path = _find_latest_jsonl(project)
-            if path is None:
-                print("[cursor-dm-relay] waiting for Cursor session...", file=sys.stderr)
-                time.sleep(2)
+        # Single explicit path — tail it once then exit.
+        session_id = _session_id(explicit_path)
+        print(f"[cursor-dm-relay] tailing {explicit_path} (session: {session_id})", file=sys.stderr)
+        watcher = threading.Thread(target=_watch_subagents, args=(explicit_path.parent, session_id), daemon=True)
+        watcher.start()
 
-    if path is None:
-        print("[cursor-dm-relay] no Cursor JSONL found — exiting", file=sys.stderr)
-        sys.exit(1)
+        def _handle_sig(sig, frame):
+            _post("Stop", {"session_id": session_id})
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, _handle_sig)
+        _tail(explicit_path, session_id)
+        return
 
-    session_id = _session_id(path)
-    print(f"[cursor-dm-relay] tailing {path} (session: {session_id})", file=sys.stderr)
+    # Auto-discover mode: loop forever, picking up each new Cursor session.
+    print(f"[cursor-dm-relay] watching {project} for Cursor sessions...", file=sys.stderr)
+    seen: set[str] = set()
 
-    # Watch subagents in background
-    watcher = threading.Thread(
-        target=_watch_subagents,
-        args=(path.parent, session_id),
-        daemon=True,
-    )
-    watcher.start()
-
-    # Handle SIGTERM gracefully (send Stop before exit)
     def _handle_sig(sig, frame):
-        _post("Stop", {"session_id": session_id})
         sys.exit(0)
-
     signal.signal(signal.SIGTERM, _handle_sig)
 
-    # Tail main session (blocks until KeyboardInterrupt or SIGTERM)
-    _tail(path, session_id)
+    while True:
+        path = _find_latest_jsonl(project)
+        if path is None or _session_id(path) in seen:
+            time.sleep(2)
+            continue
+
+        session_id = _session_id(path)
+        seen.add(session_id)
+        print(f"[cursor-dm-relay] new session: {session_id}", file=sys.stderr)
+
+        watcher = threading.Thread(target=_watch_subagents, args=(path.parent, session_id), daemon=True)
+        watcher.start()
+
+        # Tail runs in foreground — blocks until the session ends, then loops to pick up the next one.
+        _tail(path, session_id)
 
 
 if __name__ == "__main__":

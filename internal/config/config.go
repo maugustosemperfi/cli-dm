@@ -21,9 +21,10 @@ type Config struct {
 	Port      int             `yaml:"port"`
 	Agents    []AgentConfig   `yaml:"agents"`
 	Sessions  *SessionsConfig `yaml:"sessions"`
-	HooksAuth string          `yaml:"hooks_auth"` // Auth token for hook receiver
-	WatchDir  string          `yaml:"watch_dir"`  // Auto-discover projects with active Claude/Cursor sessions under this dir
-	WatchAge  string          `yaml:"watch_age"`  // Max session age for auto-discovery (e.g. "24h", "7d"), default "24h"
+	HooksAuth       string          `yaml:"hooks_auth"`        // Auth token for hook receiver
+	WatchDir        string          `yaml:"watch_dir"`         // Auto-discover projects with active Claude/Cursor sessions under this dir
+	WatchAge        string          `yaml:"watch_age"`         // Max session age for auto-discovery (e.g. "24h", "7d"), default "24h"
+	WatchSkipCursor bool            `yaml:"watch_skip_cursor"` // Skip Cursor sessions from watch_dir (use relay instead)
 }
 
 // AgentConfig defines a single agent in the config file.

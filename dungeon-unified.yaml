@@ -13,10 +13,12 @@ adapter: claude
 port: 8420
 hooks_auth: "dungeon-live-2026"
 
-# Auto-discover every Claude Code + Cursor session active in the last 24h
-# under this directory. Each project gets its own character on the map.
+# Auto-discover Codex and any other JSONL-based agent active under this dir.
+# Cursor is handled in real-time by the relay (started automatically by make dev),
+# so watch_skip_cursor: true prevents duplicate agents for the same Cursor session.
 watch_dir: "~/dev/nu/"
 watch_age: "24h"
+watch_skip_cursor: true
 
 agents:
   # Receives live Claude Code events via the hooks relay in settings.json.

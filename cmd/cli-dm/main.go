@@ -32,12 +32,13 @@ import (
 )
 
 var (
-	port        int
-	agentCmds   []string
-	adapterName string
-	configPath  string
-	resumeID    string
-	sessionsDir string
+	port               int
+	agentCmds          []string
+	adapterName        string
+	configPath         string
+	resumeID           string
+	sessionsDir        string
+	cleanRetentionDays int
 )
 
 func main() {
@@ -92,12 +93,15 @@ func main() {
 			Args:  cobra.ExactArgs(1),
 			RunE:  sessionsDeleteCmd,
 		},
-		&cobra.Command{
-			Use:   "clean",
-			Short: "Delete sessions older than retention period (default 30 days)",
-			RunE:  sessionsCleanCmd,
-		},
 	)
+
+	cleanSessionCmd := &cobra.Command{
+		Use:   "clean",
+		Short: "Delete sessions older than retention period",
+		RunE:  sessionsCleanCmd,
+	}
+	cleanSessionCmd.Flags().IntVar(&cleanRetentionDays, "days", 0, "Retention in days (default: 30)")
+	sessionsCmd.AddCommand(cleanSessionCmd)
 
 	rootCmd.AddCommand(sessionsCmd)
 
@@ -238,6 +242,20 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	hub := server.NewHub(buildSnapshot, logger)
+
+	// Prune old recorded sessions on startup when retention is configured.
+	if fileCfg != nil && fileCfg.Sessions != nil {
+		retention := fileCfg.Sessions.RetentionDays
+		if retention <= 0 {
+			retention = 30
+		}
+		sm := storage.NewSessionManager(resolveSessionsDir(fileCfg.Sessions.Dir))
+		if err := sm.CleanOldSessions(retention); err != nil {
+			logger.Warn("startup session cleanup failed", "error", err)
+		} else {
+			logger.Debug("startup session cleanup complete", "retentionDays", retention)
+		}
+	}
 
 	// --- Session persistence ---
 	var eventStore *storage.FileEventStore
@@ -703,6 +721,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				logger.Error("watch_dir discovery failed", "dir", watchDir, "error", err)
 			} else {
+				if fileCfg.WatchSkipCursor {
+					filtered := projects[:0]
+					for _, p := range projects {
+						if !p.IsCursor {
+							filtered = append(filtered, p)
+						}
+					}
+					projects = filtered
+				}
 				logger.Info("discovered projects with active sessions", "dir", watchDir, "count", len(projects))
 				baseIdx := len(fileCfg.Agents) // offset agent IDs to avoid collision
 				for j, proj := range projects {
@@ -944,6 +971,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 						if err != nil {
 							continue
 						}
+						if fileCfg.WatchSkipCursor {
+							filtered := projects[:0]
+							for _, p := range projects {
+								if !p.IsCursor {
+									filtered = append(filtered, p)
+								}
+							}
+							projects = filtered
+						}
 						for j, proj := range projects {
 							role := defaultRoles[j%len(defaultRoles)]
 							spawnLateWatcher(proj.SessionPath, proj.ProjectName, role)
@@ -1066,8 +1102,11 @@ func sessionsDeleteCmd(cmd *cobra.Command, args []string) error {
 }
 
 func sessionsCleanCmd(cmd *cobra.Command, args []string) error {
+	retentionDays := cleanRetentionDays
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
 	sm := getSessionManager()
-	retentionDays := 30
 	if err := sm.CleanOldSessions(retentionDays); err != nil {
 		return err
 	}
