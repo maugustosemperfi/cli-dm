@@ -26,21 +26,31 @@ export class Corridor extends Graphics {
   private flowIntensity = 0;
   private fireIntensity = 0;
   private accumulatedHeat = 0;
-  private burnPulse = 0;       // 0-1, normalized burn intensity for width pulse
-  private bottleneckRatio = 0; // fraction of total tokens at this corridor's endpoint
-  /** Precomputed spine points for the corridor curve */
+  private burnPulse = 0;
+  private bottleneckRatio = 0;
   private spine: Array<[number, number]> = [];
   private overlayGfx: Graphics;
+  private effectGfx: Graphics;
+  private particleGfx: Graphics;
+  private lastAccentColor: number = THEME.corridorDefault;
+  private lastBlocked = false;
+  private lastBurnPulse = -1;
+  private lastBottleneckRatio = -1;
 
   constructor(from: LayoutNode, to: LayoutNode) {
     super();
     this.fromNode = from;
     this.toNode = to;
+    this.effectGfx = new Graphics();
+    this.particleGfx = new Graphics();
     this.overlayGfx = new Graphics();
     this.overlayGfx.alpha = 0;
+    this.addChild(this.effectGfx);
+    this.addChild(this.particleGfx);
     this.addChild(this.overlayGfx);
     this.computeSpine();
-    this.draw(THEME.corridorDefault, false);
+    this.drawStatic(THEME.corridorDefault, false);
+    this.refreshEffects();
   }
 
   /** Get accumulated traffic heat (0-1) */
@@ -72,13 +82,35 @@ export class Corridor extends Graphics {
       color = THEME.corridorActive;
     }
 
-    this.draw(color, isBlocked);
+    if (color === this.lastAccentColor && isBlocked === this.lastBlocked) return;
+    this.lastAccentColor = color;
+    this.lastBlocked = isBlocked;
+    this.drawStatic(color, isBlocked);
+    this.refreshEffects();
+  }
+
+  /** Drop transient particles and overlay intensities (CLEAR / PRUNE). */
+  resetEphemeral() {
+    this.flowParticles = [];
+    this.fireParticles = [];
+    this.flowIntensity = 0;
+    this.fireIntensity = 0;
+    this.accumulatedHeat = 0;
+    this.burnPulse = 0;
+    this.bottleneckRatio = 0;
+    this.lastBurnPulse = -1;
+    this.lastBottleneckRatio = -1;
+    this.particleGfx.clear();
+    this.effectGfx.clear();
+    this.overlayGfx.clear();
+    this.overlayGfx.alpha = 0;
   }
 
   /** Add tool flow energy — particles travel along the corridor */
   addFlow(agentRole?: string) {
     this.flowIntensity = Math.min(1, this.flowIntensity + 0.3);
     this.accumulatedHeat = Math.min(1, this.accumulatedHeat + 0.02);
+    this.refreshEffects();
     const color = agentRole ? (AGENT_HEX[agentRole] ?? THEME.corridorActive) : THEME.corridorActive;
     const count = 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < count; i++) {
@@ -93,6 +125,7 @@ export class Corridor extends Graphics {
     if (this.flowParticles.length > 30) {
       this.flowParticles.splice(0, this.flowParticles.length - 30);
     }
+    this.redrawParticles();
   }
 
   /** Ignite fire on this corridor — error propagation */
@@ -109,6 +142,8 @@ export class Corridor extends Graphics {
     if (this.fireParticles.length > 40) {
       this.fireParticles.splice(0, this.fireParticles.length - 40);
     }
+    this.refreshEffects();
+    this.redrawParticles();
   }
 
   /** Spawn token flow particles — gold (input) and cyan (output) */
@@ -127,17 +162,24 @@ export class Corridor extends Graphics {
     if (this.flowParticles.length > 50) {
       this.flowParticles.splice(0, this.flowParticles.length - 50);
     }
+    this.redrawParticles();
   }
 
   /** Set burn intensity for corridor width pulse (0-1 normalized) */
   setBurnIntensity(ratePerMin: number) {
-    // Normalize: 10k tokens/min = full intensity
-    this.burnPulse = Math.min(1, ratePerMin / 10000);
+    const pulse = Math.min(1, ratePerMin / 10000);
+    if (Math.abs(pulse - this.lastBurnPulse) < 0.01) return;
+    this.lastBurnPulse = pulse;
+    this.burnPulse = pulse;
+    this.refreshEffects();
   }
 
   /** Set bottleneck ratio — shows warning when >0.5 */
   setBottleneck(ratio: number) {
+    if (Math.abs(ratio - this.lastBottleneckRatio) < 0.01) return;
+    this.lastBottleneckRatio = ratio;
     this.bottleneckRatio = ratio;
+    this.refreshEffects();
   }
 
   /** Set overlay tinting for the active map layer */
@@ -210,11 +252,19 @@ export class Corridor extends Graphics {
   tick(dt: number) {
     this.dashOffset += dt * 0.5;
 
+    const prevFlow = this.flowIntensity;
+    const prevFire = this.fireIntensity;
     this.flowIntensity *= 0.995;
     this.fireIntensity *= 0.99;
     this.accumulatedHeat *= 0.9995;
+    if (
+      Math.abs(prevFlow - this.flowIntensity) > 0.02 ||
+      Math.abs(prevFire - this.fireIntensity) > 0.02
+    ) {
+      this.refreshEffects();
+    }
 
-    let needsRedraw = false;
+    let particlesChanged = false;
     for (let i = this.flowParticles.length - 1; i >= 0; i--) {
       const p = this.flowParticles[i];
       p.t += p.speed * dt;
@@ -222,7 +272,7 @@ export class Corridor extends Graphics {
       if (p.t > 1 || p.alpha <= 0) {
         this.flowParticles.splice(i, 1);
       }
-      needsRedraw = true;
+      particlesChanged = true;
     }
 
     for (let i = this.fireParticles.length - 1; i >= 0; i--) {
@@ -232,11 +282,11 @@ export class Corridor extends Graphics {
       if (fp.life <= 0) {
         this.fireParticles.splice(i, 1);
       }
-      needsRedraw = true;
+      particlesChanged = true;
     }
 
-    if (needsRedraw && (this.flowParticles.length > 0 || this.fireParticles.length > 0)) {
-      this.drawParticles();
+    if (particlesChanged) {
+      this.redrawParticles();
     }
   }
 
@@ -319,11 +369,14 @@ export class Corridor extends Graphics {
   // Drawing
   // ---------------------------------------------------------------------------
 
-  private drawParticles() {
+  private redrawParticles() {
+    this.particleGfx.clear();
+    if (this.flowParticles.length === 0 && this.fireParticles.length === 0) return;
+
     for (const p of this.flowParticles) {
       const [px, py] = this.pointOnCurve(p.t);
-      this.circle(px, py, p.size).fill({ color: p.color, alpha: p.alpha });
-      this.circle(px, py, p.size * 2).fill({ color: p.color, alpha: p.alpha * 0.15 });
+      this.particleGfx.circle(px, py, p.size).fill({ color: p.color, alpha: p.alpha });
+      this.particleGfx.circle(px, py, p.size * 2).fill({ color: p.color, alpha: p.alpha * 0.15 });
     }
 
     for (const fp of this.fireParticles) {
@@ -331,11 +384,70 @@ export class Corridor extends Graphics {
       const fx = bx + fp.x;
       const fy = by + fp.vy * (1 - fp.life) * 30;
       const fireColor = fp.life > 0.5 ? 0xbf6b5b : 0xbfa85b;
-      this.circle(fx, fy, 2 + fp.life * 2).fill({ color: fireColor, alpha: fp.life * 0.8 });
+      this.particleGfx.circle(fx, fy, 2 + fp.life * 2).fill({ color: fireColor, alpha: fp.life * 0.8 });
     }
   }
 
-  private draw(accentColor: number, blocked: boolean) {
+  private refreshEffects() {
+    const g = this.effectGfx;
+    g.clear();
+    if (this.spine.length < 2) return;
+
+    if (this.flowIntensity > 0.05) {
+      g.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        g.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      g.stroke({
+        color: THEME.corridorActive,
+        width: CORRIDOR_HALF_W + this.flowIntensity * 8,
+        alpha: this.flowIntensity * 0.15,
+      });
+    }
+
+    if (this.fireIntensity > 0.05) {
+      g.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        g.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      g.stroke({
+        color: 0xbf6b5b,
+        width: CORRIDOR_HALF_W + this.fireIntensity * 6,
+        alpha: this.fireIntensity * 0.2,
+      });
+    }
+
+    if (this.accumulatedHeat > 0.02) {
+      const heatColor = this.accumulatedHeat < 0.33 ? 0x5b8abf
+        : this.accumulatedHeat < 0.66 ? 0xbfa85b : 0xbf6b5b;
+      g.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        g.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      g.stroke({ color: heatColor, width: CORRIDOR_HALF_W * 0.8, alpha: this.accumulatedHeat * 0.12 });
+    }
+
+    if (this.burnPulse > 0.05) {
+      g.moveTo(this.spine[0][0], this.spine[0][1]);
+      for (let i = 1; i <= SPINE_STEPS; i++) {
+        g.lineTo(this.spine[i][0], this.spine[i][1]);
+      }
+      g.stroke({ color: 0xffd700, width: CORRIDOR_HALF_W * 0.6 + this.burnPulse * 3, alpha: this.burnPulse * 0.08 });
+    }
+
+    if (this.bottleneckRatio > 0.5) {
+      const midIdx = Math.floor(SPINE_STEPS / 2);
+      const [mx, my] = this.spine[midIdx];
+      const s = 6 + (this.bottleneckRatio - 0.5) * 8;
+      g.moveTo(mx, my - s).lineTo(mx + s, my).lineTo(mx, my + s).lineTo(mx - s, my).closePath();
+      g.fill({ color: 0xff8c00, alpha: 0.4 + this.bottleneckRatio * 0.3 });
+      const si = s * 0.5;
+      g.moveTo(mx, my - si).lineTo(mx + si, my).lineTo(mx, my + si).lineTo(mx - si, my).closePath();
+      g.fill({ color: 0xffa500, alpha: 0.6 });
+    }
+  }
+
+  private drawStatic(accentColor: number, blocked: boolean) {
     this.clear();
 
     if (this.spine.length < 2) return;
@@ -406,59 +518,6 @@ export class Corridor extends Graphics {
       this.stroke({ color: accentColor, width: 6, alpha: 0.08 });
     }
 
-    // --- Flow intensity glow ---
-    if (this.flowIntensity > 0.05) {
-      this.moveTo(this.spine[0][0], this.spine[0][1]);
-      for (let i = 1; i <= SPINE_STEPS; i++) {
-        this.lineTo(this.spine[i][0], this.spine[i][1]);
-      }
-      this.stroke({ color: THEME.corridorActive, width: CORRIDOR_HALF_W + this.flowIntensity * 8, alpha: this.flowIntensity * 0.15 });
-    }
-
-    // --- Fire glow ---
-    if (this.fireIntensity > 0.05) {
-      this.moveTo(this.spine[0][0], this.spine[0][1]);
-      for (let i = 1; i <= SPINE_STEPS; i++) {
-        this.lineTo(this.spine[i][0], this.spine[i][1]);
-      }
-      this.stroke({ color: 0xbf6b5b, width: CORRIDOR_HALF_W + this.fireIntensity * 6, alpha: this.fireIntensity * 0.2 });
-    }
-
-    // --- Corridor traffic heatmap ---
-    if (this.accumulatedHeat > 0.02) {
-      const heatColor = this.accumulatedHeat < 0.33 ? 0x5b8abf
-        : this.accumulatedHeat < 0.66 ? 0xbfa85b : 0xbf6b5b;
-      this.moveTo(this.spine[0][0], this.spine[0][1]);
-      for (let i = 1; i <= SPINE_STEPS; i++) {
-        this.lineTo(this.spine[i][0], this.spine[i][1]);
-      }
-      this.stroke({ color: heatColor, width: CORRIDOR_HALF_W * 0.8, alpha: this.accumulatedHeat * 0.12 });
-    }
-
-    // --- Token burn pulse glow ---
-    if (this.burnPulse > 0.05) {
-      this.moveTo(this.spine[0][0], this.spine[0][1]);
-      for (let i = 1; i <= SPINE_STEPS; i++) {
-        this.lineTo(this.spine[i][0], this.spine[i][1]);
-      }
-      const pulseWidth = CORRIDOR_HALF_W * 0.6 + this.burnPulse * 3;
-      this.stroke({ color: 0xffd700, width: pulseWidth, alpha: this.burnPulse * 0.08 });
-    }
-
-    // --- Bottleneck warning indicator ---
-    if (this.bottleneckRatio > 0.5) {
-      const midIdx = Math.floor(SPINE_STEPS / 2);
-      const [mx, my] = this.spine[midIdx];
-      const s = 6 + (this.bottleneckRatio - 0.5) * 8; // 6-10px
-      // Pulsing orange diamond
-      this.moveTo(mx, my - s).lineTo(mx + s, my).lineTo(mx, my + s).lineTo(mx - s, my).closePath();
-      this.fill({ color: 0xff8c00, alpha: 0.4 + this.bottleneckRatio * 0.3 });
-      // Inner diamond
-      const si = s * 0.5;
-      this.moveTo(mx, my - si).lineTo(mx + si, my).lineTo(mx, my + si).lineTo(mx - si, my).closePath();
-      this.fill({ color: 0xffa500, alpha: 0.6 });
-    }
-
     // --- Blocked marker: X at midpoint ---
     if (blocked) {
       const [mx, my] = this.spine[Math.floor(SPINE_STEPS / 2)];
@@ -487,11 +546,6 @@ export class Corridor extends Graphics {
       .moveTo(last[0], last[1])
       .lineTo(last[0] - ax * arrowSize + ay * arrowSize, last[1] - ay * arrowSize - ax * arrowSize)
       .stroke({ color: accentColor, width: 2, alpha: 0.5 });
-
-    // Draw active particles on top
-    if (this.flowParticles.length > 0 || this.fireParticles.length > 0) {
-      this.drawParticles();
-    }
   }
 
   /** Draw a small doorway arch at a corridor endpoint */

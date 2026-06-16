@@ -25,35 +25,46 @@ export class FogOfWar extends Graphics {
   }
 
   setCell(nodeId: string, x: number, y: number) {
-    if (!this.cells.has(nodeId)) {
-      this.cells.set(nodeId, {
-        nodeId,
-        x,
-        y,
-        currentAlpha: FOG_UNREVEALED,
-        targetAlpha: FOG_UNREVEALED,
-      });
-      this.dirty = true;
+    const existing = this.cells.get(nodeId);
+    if (existing) {
+      if (existing.x !== x || existing.y !== y) {
+        existing.x = x;
+        existing.y = y;
+        this.dirty = true;
+      }
+      return;
     }
+    this.cells.set(nodeId, {
+      nodeId,
+      x,
+      y,
+      currentAlpha: FOG_UNREVEALED,
+      targetAlpha: FOG_UNREVEALED,
+    });
+    this.dirty = true;
   }
 
   updateVisibility(
     visitedRooms: Set<string>,
     adjacencyMap: Map<string, string[]>,
   ) {
+    let visibilityChanged = false;
     for (const cell of this.cells.values()) {
+      let targetAlpha = FOG_UNREVEALED;
       if (visitedRooms.has(cell.nodeId)) {
-        cell.targetAlpha = FOG_REVEALED;
+        targetAlpha = FOG_REVEALED;
       } else {
         const neighbors = adjacencyMap.get(cell.nodeId);
         if (neighbors && neighbors.some((n) => visitedRooms.has(n))) {
-          cell.targetAlpha = FOG_ADJACENT;
-        } else {
-          cell.targetAlpha = FOG_UNREVEALED;
+          targetAlpha = FOG_ADJACENT;
         }
       }
+      if (cell.targetAlpha !== targetAlpha) {
+        cell.targetAlpha = targetAlpha;
+        visibilityChanged = true;
+      }
     }
-    this.dirty = true;
+    if (visibilityChanged) this.dirty = true;
   }
 
   tick(dt: number) {

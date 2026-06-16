@@ -529,6 +529,7 @@ export class RoomNode extends Container {
   private spawnSparks = false;
   private spawnShimmer = false;
   private lastDecoKey = "";
+  private lastOverlayKey = "";
 
   constructor(nodeId: string, label: string, x: number, y: number) {
     super();
@@ -714,7 +715,11 @@ export class RoomNode extends Container {
   }
 
   setFire(intensity: number) {
-    if (intensity > this.fireIntensity) {
+    const next = Math.max(0, intensity);
+    if (Math.abs(next - this.fireIntensity) < 0.01) return;
+    const rising = next > this.fireIntensity;
+    this.fireIntensity = next;
+    if (rising && next > 0.05) {
       for (let i = 0; i < 4; i++) {
         this.fireEmbers.push({
           x: Math.random() * W,
@@ -725,11 +730,38 @@ export class RoomNode extends Container {
         });
       }
     }
-    this.fireIntensity = Math.max(this.fireIntensity, intensity);
+  }
+
+  /** Drop transient fire/overlay/decoration state (CLEAR / PRUNE). */
+  resetEphemeral() {
+    this.fireIntensity = 0;
+    this.fireEmbers = [];
+    this.fireGlow.clear();
+    this.fireGlow.alpha = 0;
+    this.decoParticles = [];
+    this.decoParticleGfx.clear();
+    this.lastOverlayKey = "";
+    this.overlayGfx.clear();
+    this.overlayGfx.alpha = 0;
+    this.currentOverlayType = "default";
   }
 
   /** Set the map overlay for this room based on the active layer and metrics */
   setOverlay(layer: MapLayer, metrics: RoomMetrics | null, maxTokens: number, maxErrors: number) {
+    const activityBucket =
+      layer === "activity" || layer === "fog" ? Math.floor(Date.now() / 5000) : 0;
+    const overlayKey = [
+      layer,
+      metrics?.totalTokens ?? 0,
+      metrics?.errorCount ?? 0,
+      metrics?.lastActionTs ?? 0,
+      maxTokens,
+      maxErrors,
+      activityBucket,
+    ].join(":");
+    if (overlayKey === this.lastOverlayKey) return;
+    this.lastOverlayKey = overlayKey;
+
     this.currentOverlayType = layer;
     this.overlayGfx.clear();
 
@@ -803,6 +835,7 @@ export class RoomNode extends Container {
     } else {
       label = `\u26C3 ${RoomNode.fmtTokens(totalTokens)}`;
     }
+    if (this.costText.text === label && this.costText.alpha > 0) return;
     this.costText.text = label;
     this.costText.alpha = 0.85;
   }
