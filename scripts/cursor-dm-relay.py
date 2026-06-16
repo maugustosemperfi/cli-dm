@@ -67,6 +67,10 @@ def _session_id(p: Path) -> str:
     """UUID from the parent directory name."""
     return p.parent.name
 
+def _hook_payload(session_id: str, **extra) -> dict:
+    """Base hook payload — tags events as coming from Cursor."""
+    return {"session_id": session_id, "source": "cursor", **extra}
+
 # ---------------------------------------------------------------------------
 # HTTP relay (fire-and-forget, fail-safe)
 # ---------------------------------------------------------------------------
@@ -84,28 +88,44 @@ def _post(hook_type: str, payload: dict) -> None:
     try:
         with urllib.request.urlopen(req, timeout=2) as r:
             r.read()
-    except Exception:
-        pass  # cli-dm down or unreachable — never block Cursor
+    except Exception as exc:
+        # Log auth/HTTP failures — silent swallow hid broken Cursor integration.
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+            print("[cursor-dm-relay] hook POST unauthorized — set CLI_DM_HOOK_TOKEN", file=sys.stderr)
+        elif os.environ.get("CLI_DM_RELAY_DEBUG"):
+            print(f"[cursor-dm-relay] hook POST failed: {exc}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # Core tail loop
 # ---------------------------------------------------------------------------
 
+def _relay_tool(session_id: str, name: str, tool_input: dict, tool_response: str = "") -> None:
+    """Emit PreToolUse + PostToolUse for one tool invocation."""
+    base = _hook_payload(session_id, tool_name=name, tool_input=tool_input)
+    _post("PreToolUse", base)
+    _post("PostToolUse", {**base, "tool_response": tool_response[:2000]})
+
 def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
-    """Tail a Cursor JSONL, pair tool_use↔tool_result, relay to /api/hooks."""
+    """Tail a Cursor JSONL and relay tool events to /api/hooks.
+
+    Cursor agent-transcripts record assistant tool_use blocks but do NOT persist
+    user-side tool_result blocks (unlike Claude Code JSONL). Relay each tool_use
+    immediately; still handle tool_result when present (Claude-style transcripts).
+    """
     is_sub = parent_id is not None
 
     if is_sub:
-        _post("SubagentStart", {
-            "session_id": session_id,
-            "parent_session_id": parent_id,
-            "agent_id": session_id,
-        })
+        _post("SubagentStart", _hook_payload(
+            session_id,
+            parent_session_id=parent_id,
+            agent_id=session_id,
+        ))
     else:
-        _post("SessionStart", {"session_id": session_id})
+        _post("SessionStart", _hook_payload(session_id))
 
-    # pending[tool_use_id] = {name, input}
+    # pending[tool_use_id] = {name, input} — for Claude-style tool_result pairing
     pending: dict[str, dict] = {}
+    relayed: set[str] = set()
 
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -134,15 +154,22 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
                     continue
 
                 if role == "assistant":
-                    for block in content:
+                    for bi, block in enumerate(content):
                         if not isinstance(block, dict):
                             continue
-                        if block.get("type") == "tool_use":
-                            tid = block.get("id", "")
-                            pending[tid] = {
-                                "name":  block.get("name", ""),
-                                "input": block.get("input", {}),
-                            }
+                        if block.get("type") != "tool_use":
+                            continue
+                        tid = block.get("id") or f"{hash(line)}:{bi}:{block.get('name', '')}"
+                        if tid in relayed:
+                            continue
+                        relayed.add(tid)
+                        tool = {
+                            "name": block.get("name", ""),
+                            "input": block.get("input", {}),
+                        }
+                        pending[tid] = tool
+                        # Cursor transcripts omit tool_result — relay on tool_use.
+                        _relay_tool(session_id, tool["name"], tool["input"])
 
                 elif role == "user":
                     for block in content:
@@ -152,8 +179,9 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
                             continue
                         tid  = block.get("tool_use_id", "")
                         tool = pending.pop(tid, None)
-                        if tool is None:
+                        if tool is None or tid in relayed:
                             continue
+                        relayed.add(tid)
 
                         # Normalise result to string
                         result = block.get("content", "")
@@ -166,21 +194,21 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
                         event_type = (
                             "PostToolUseFailure" if block.get("is_error") else "PostToolUse"
                         )
-                        _post(event_type, {
-                            "session_id":    session_id,
-                            "tool_name":     tool["name"],
-                            "tool_input":    tool["input"],
-                            "tool_response": str(result)[:2000],
-                        })
+                        _post(event_type, _hook_payload(
+                            session_id,
+                            tool_name=tool["name"],
+                            tool_input=tool["input"],
+                            tool_response=str(result)[:2000],
+                        ))
 
     except (KeyboardInterrupt, SystemExit):
         pass
 
     finally:
         if is_sub:
-            _post("SubagentStop", {"session_id": session_id, "agent_id": session_id})
+            _post("SubagentStop", _hook_payload(session_id, agent_id=session_id))
         else:
-            _post("Stop", {"session_id": session_id})
+            _post("Stop", _hook_payload(session_id))
 
 
 def _watch_subagents(session_dir: Path, parent_id: str) -> None:
@@ -232,7 +260,7 @@ def main() -> None:
         watcher.start()
 
         def _handle_sig(sig, frame):
-            _post("Stop", {"session_id": session_id})
+            _post("Stop", _hook_payload(session_id))
             sys.exit(0)
         signal.signal(signal.SIGTERM, _handle_sig)
         _tail(explicit_path, session_id)

@@ -12,9 +12,14 @@
 # positional argument in some Claude Code versions). We check both.
 
 CLI_DM_URL="${CLI_DM_URL:-http://localhost:8420}"
-CLI_DM_TOKEN="${CLI_DM_TOKEN:-}"
+CLI_DM_TOKEN="${CLI_DM_TOKEN:-${CLI_DM_HOOK_TOKEN:-}}"
 
 payload=$(cat)
+
+# Tag hook events so cli-dm names the agent "claude" (vs "cursor" from cursor-dm-relay).
+if command -v jq >/dev/null 2>&1; then
+  payload=$(printf '%s' "$payload" | jq -c '. + {source: "claude"}' 2>/dev/null) || true
+fi
 
 # Determine hook type: env var takes precedence, then first argument
 hook_type="${CLAUDE_HOOK_EVENT_NAME:-}"
