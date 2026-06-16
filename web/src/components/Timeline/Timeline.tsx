@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import type { TimelineSegment } from "../../stores/gameState";
+import { deriveTimeline } from "../../stores/deriveViews";
 
 const ACTION_COLORS: Record<string, string> = {
   read: "#5b8abf",
@@ -35,8 +36,13 @@ interface TooltipState {
 }
 
 export function Timeline({ onClose }: { onClose?: () => void }) {
-  const timeline = useGameState((s) => s.timeline);
+  const eventRing = useGameState((s) => s.eventRing);
+  const eventRingVersion = useGameState((s) => s.eventRingVersion);
   const agents = useGameState((s) => s.agents);
+  const timeline = useMemo(
+    () => deriveTimeline(eventRing, agents),
+    [eventRing, eventRingVersion, agents]
+  );
   const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
   const searchQuery = useGameState((s) => s.searchQuery);

@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useGameState, AGENT_COLORS, xpForNextLevel } from "../../stores/gameState";
+import { deriveTimeline } from "../../stores/deriveViews";
 
 // ─── Format helpers ────────────────────────────────────────────────────────────
 
@@ -23,7 +24,12 @@ function formatTokens(t: number): string {
 
 export function ScoreScreen() {
   const agents = useGameState((s) => s.agents);
-  const timeline = useGameState((s) => s.timeline);
+  const eventRing = useGameState((s) => s.eventRing);
+  const eventRingVersion = useGameState((s) => s.eventRingVersion);
+  const timeline = useMemo(
+    () => deriveTimeline(eventRing, agents),
+    [eventRing, eventRingVersion, agents]
+  );
   const [dismissed, setDismissed] = useState(false);
   const [copied, setCopied] = useState(false);
 

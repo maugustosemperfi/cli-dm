@@ -6,6 +6,8 @@ import type {
   GameEvent,
 } from "../protocol/events";
 import { soundManager } from "../audio/SoundManager";
+import { appendToRing, pruneRing } from "./eventRing";
+import { deriveTranscript, deriveTimeline } from "./deriveViews";
 
 // Agent color palette — maps to dungeon roles
 export const AGENT_COLORS: Record<string, string> = {
@@ -137,14 +139,6 @@ export interface AgentState extends AgentSnapshot {
   completedAt?: number;
 }
 
-export interface EventLogEntry {
-  ts: number;
-  category: "action" | "complete" | "error" | "blocked" | "resolve" | "dag" | "spawn";
-  agentName?: string;
-  agentRole?: string;
-  message: string;
-}
-
 // Tool flow tracking — records action transitions between rooms for Sankey-style corridors
 export interface ToolFlowEntry {
   fromNodeId: string;
@@ -237,8 +231,6 @@ const TIME_RANGE_MS: Record<SearchFilters["timeRange"], number> = {
   all: Infinity,
 };
 
-const MAX_LOG_ENTRIES = 500;
-
 // Browser notification helper
 function notifyBrowser(message: string, tag: string) {
   if (typeof Notification === "undefined") return;
@@ -254,10 +246,9 @@ interface GameState {
   dag: DAGSnapshot;
   connected: boolean;
   selectedAgent: string | null;
-  eventLog: EventLogEntry[];
+  eventRing: GameEvent[];
+  eventRingVersion: number;
   toolFlows: ToolFlowEntry[];
-  transcript: TranscriptEntry[];
-  timeline: TimelineSegment[];
   errorPropagations: ErrorPropagation[];
   roomMetrics: Map<string, RoomMetrics>;
   burnRates: Map<string, BurnRate>;
@@ -289,15 +280,13 @@ interface GameState {
 }
 
 const MAX_TOOL_FLOWS = 200;
-const MAX_TRANSCRIPT = 1000;
 
 // --- Batched event reducer (one Zustand set() per incoming event) ---
 interface EventDraft {
   agents: Map<string, AgentState>;
   dag: DAGSnapshot;
-  eventLog: EventLogEntry[];
-  transcript: TranscriptEntry[];
-  timeline: TimelineSegment[];
+  eventRing: GameEvent[];
+  eventRingVersion: number;
   toolFlows: ToolFlowEntry[];
   errorPropagations: ErrorPropagation[];
   roomMetrics: Map<string, RoomMetrics>;
@@ -306,13 +295,14 @@ interface EventDraft {
   bosses: Map<string, BossState>;
 }
 
-function createEventDraft(state: Pick<GameState, keyof EventDraft>): EventDraft {
+type EventDraftState = Pick<GameState, keyof EventDraft>;
+
+function createEventDraft(state: EventDraftState): EventDraft {
   return {
     agents: state.agents,
     dag: state.dag,
-    eventLog: state.eventLog,
-    transcript: state.transcript,
-    timeline: state.timeline,
+    eventRing: state.eventRing,
+    eventRingVersion: state.eventRingVersion,
     toolFlows: state.toolFlows,
     errorPropagations: state.errorPropagations,
     roomMetrics: state.roomMetrics,
@@ -323,7 +313,7 @@ function createEventDraft(state: Pick<GameState, keyof EventDraft>): EventDraft 
 }
 
 function commitEventDraft(
-  state: Pick<GameState, keyof EventDraft>,
+  state: EventDraftState,
   draft: EventDraft,
   set: (partial: Partial<GameState>) => void,
   saveStats: boolean,
@@ -331,9 +321,8 @@ function commitEventDraft(
   const patch: Partial<GameState> = {};
   if (draft.agents !== state.agents) patch.agents = draft.agents;
   if (draft.dag !== state.dag) patch.dag = draft.dag;
-  if (draft.eventLog !== state.eventLog) patch.eventLog = draft.eventLog;
-  if (draft.transcript !== state.transcript) patch.transcript = draft.transcript;
-  if (draft.timeline !== state.timeline) patch.timeline = draft.timeline;
+  if (draft.eventRing !== state.eventRing) patch.eventRing = draft.eventRing;
+  if (draft.eventRingVersion !== state.eventRingVersion) patch.eventRingVersion = draft.eventRingVersion;
   if (draft.toolFlows !== state.toolFlows) patch.toolFlows = draft.toolFlows;
   if (draft.errorPropagations !== state.errorPropagations) patch.errorPropagations = draft.errorPropagations;
   if (draft.roomMetrics !== state.roomMetrics) patch.roomMetrics = draft.roomMetrics;
@@ -462,10 +451,9 @@ export const useGameState = create<GameState>((set, get) => ({
   dag: { nodes: [], edges: [] },
   connected: false,
   selectedAgent: null,
-  eventLog: [],
+  eventRing: [],
+  eventRingVersion: 0,
   toolFlows: [],
-  transcript: [],
-  timeline: [],
   errorPropagations: [],
   roomMetrics: new Map(),
   burnRates: new Map(),
@@ -564,7 +552,8 @@ export const useGameState = create<GameState>((set, get) => ({
   },
 
   getFilteredTranscript: () => {
-    const { transcript, searchQuery, searchFilters } = get();
+    const { eventRing, agents, searchQuery, searchFilters } = get();
+    const transcript = deriveTranscript(eventRing, agents);
     const q = searchQuery.toLowerCase().trim();
     const now = Date.now();
     const cutoff = TIME_RANGE_MS[searchFilters.timeRange];
@@ -581,7 +570,8 @@ export const useGameState = create<GameState>((set, get) => ({
   },
 
   getFilteredTimeline: () => {
-    const { timeline, searchQuery, searchFilters } = get();
+    const { eventRing, agents, searchQuery, searchFilters } = get();
+    const timeline = deriveTimeline(eventRing, agents);
     const q = searchQuery.toLowerCase().trim();
     const now = Date.now();
     const cutoff = TIME_RANGE_MS[searchFilters.timeRange];
@@ -599,10 +589,9 @@ export const useGameState = create<GameState>((set, get) => ({
 
   clearEvents: () => {
     set({
-      eventLog: [],
+      eventRing: [],
+      eventRingVersion: get().eventRingVersion + 1,
       toolFlows: [],
-      transcript: [],
-      timeline: [],
       errorPropagations: [],
       roomMetrics: new Map(),
       burnRates: new Map(),
@@ -620,22 +609,14 @@ export const useGameState = create<GameState>((set, get) => ({
       removed += before - after;
     };
 
-    const eventLog = state.eventLog.filter((e) => e.ts >= cutoff);
-    countRemoved(state.eventLog.length, eventLog.length);
-
-    const transcript = state.transcript.filter((e) => e.ts >= cutoff);
-    countRemoved(state.transcript.length, transcript.length);
+    const eventRing = pruneRing(state.eventRing, cutoff);
+    countRemoved(state.eventRing.length, eventRing.length);
 
     const toolFlows = state.toolFlows.filter((e) => e.ts >= cutoff);
     countRemoved(state.toolFlows.length, toolFlows.length);
 
     const errorPropagations = state.errorPropagations.filter((e) => e.ts >= cutoff);
     countRemoved(state.errorPropagations.length, errorPropagations.length);
-
-    const timeline = state.timeline.filter(
-      (s) => s.endTs === undefined || s.endTs >= cutoff || s.startTs >= cutoff
-    );
-    countRemoved(state.timeline.length, timeline.length);
 
     const roomMetrics = new Map(state.roomMetrics);
     for (const [nodeId, m] of roomMetrics) {
@@ -666,11 +647,10 @@ export const useGameState = create<GameState>((set, get) => ({
     }
 
     set({
-      eventLog,
-      transcript,
+      eventRing,
+      eventRingVersion: state.eventRingVersion + 1,
       toolFlows,
       errorPropagations,
-      timeline,
       roomMetrics,
       burnRates,
       roomHistory,
@@ -683,21 +663,9 @@ export const useGameState = create<GameState>((set, get) => ({
     const state = get();
     const ts = "ts" in event ? (event.ts ?? Date.now()) : Date.now();
     const draft = createEventDraft(state);
+    draft.eventRing = appendToRing(state.eventRing, event);
+    draft.eventRingVersion = state.eventRingVersion + 1;
     let saveStats = false;
-
-    const pushLog = (entry: Omit<EventLogEntry, "ts">) => {
-      draft.eventLog = [...draft.eventLog, { ...entry, ts }];
-      if (draft.eventLog.length > MAX_LOG_ENTRIES) {
-        draft.eventLog = draft.eventLog.slice(-MAX_LOG_ENTRIES);
-      }
-    };
-
-    const pushTranscript = (entry: Omit<TranscriptEntry, "ts">) => {
-      draft.transcript = [...draft.transcript, { ...entry, ts }];
-      if (draft.transcript.length > MAX_TRANSCRIPT) {
-        draft.transcript = draft.transcript.slice(-MAX_TRANSCRIPT);
-      }
-    };
 
     const agentNodeId = (agentId: string): string | undefined =>
       draft.dag.nodes.find((n) => n.assignee === agentId)?.nodeId;
@@ -776,8 +744,6 @@ export const useGameState = create<GameState>((set, get) => ({
           actionProfile: { recentActions: [], classType: 'paladin', classChangedAt: 0 },
         });
         draft.agents = agents;
-        pushLog({ category: "spawn", agentName: event.name, agentRole: event.role, message: `joined the dungeon as ${event.role}` });
-        pushTranscript({ agentId: event.agentId, agentName: event.name, agentRole: event.role, kind: "spawn", message: `joined the dungeon as ${event.role}` });
         break;
       }
 
@@ -793,13 +759,7 @@ export const useGameState = create<GameState>((set, get) => ({
             completedAt: event.ts ?? Date.now(),
           });
           draft.agents = agents;
-          const tl = [...draft.timeline];
-          const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) openSeg.endTs = ts;
-          draft.timeline = tl;
           soundManager.playComplete();
-          pushLog({ category: "complete", agentName: agent.name, agentRole: agent.role, message: `completed (exit ${event.exitCode})` });
-          pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "complete", message: `completed (exit ${event.exitCode})` });
           notifyBrowser(`${agent.name} completed their quest!`, "complete-" + event.agentId);
         }
         break;
@@ -815,8 +775,6 @@ export const useGameState = create<GameState>((set, get) => ({
           });
           draft.agents = agents;
           soundManager.playError();
-          pushLog({ category: "error", agentName: agent.name, agentRole: agent.role, message: event.message ?? "hit an error" });
-          pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "error", message: event.message ?? "hit an error" });
           notifyBrowser(`${agent.name} hit an error!`, "error-" + event.agentId);
 
           // Room metrics: track error
@@ -926,19 +884,6 @@ export const useGameState = create<GameState>((set, get) => ({
             draft.toolFlows = flows;
           }
 
-          const tl = [...draft.timeline];
-          const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) openSeg.endTs = ts;
-          tl.push({
-            agentId: event.agentId,
-            agentName: agent.name,
-            agentRole: agent.role,
-            action: event.action,
-            detail: event.detail,
-            startTs: ts,
-          });
-          draft.timeline = tl;
-
           const startNodeId = agentNodeId(event.agentId);
           if (startNodeId) {
             const roomHistory = new Map(draft.roomHistory);
@@ -947,10 +892,6 @@ export const useGameState = create<GameState>((set, get) => ({
             roomHistory.set(startNodeId, rh);
             draft.roomHistory = roomHistory;
           }
-
-          const detail = event.detail ? `: ${event.detail}` : "";
-          pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `started ${event.action}${detail}` });
-          pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_start", action: event.action, detail: event.detail });
 
           const bossSpawnNode = agentNodeId(event.agentId);
           if (bossSpawnNode) {
@@ -1039,15 +980,7 @@ export const useGameState = create<GameState>((set, get) => ({
             draft.roomHistory = roomHistory;
           }
 
-          const tl = [...draft.timeline];
-          const openSeg = tl.findLast((s) => s.agentId === event.agentId && !s.endTs);
-          if (openSeg) openSeg.endTs = ts;
-          draft.timeline = tl;
-
-          pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "tool_end", action: agent.currentAction, detail: event.detail });
-
           if (newLevel > agent.level) {
-            pushLog({ category: "action", agentName: agent.name, agentRole: agent.role, message: `LEVEL UP! Now level ${newLevel}` });
             notifyBrowser(`${agent.name} leveled up to ${newLevel}!`, "level-up");
             soundManager.playLevelUp();
           }
@@ -1123,8 +1056,6 @@ export const useGameState = create<GameState>((set, get) => ({
           });
           draft.agents = agents;
           soundManager.playBlocked();
-          pushLog({ category: "blocked", agentName: agent.name, agentRole: agent.role, message: `blocked: ${event.detail ?? "unknown reason"}` });
-          pushTranscript({ agentId: event.agentId, agentName: agent.name, agentRole: agent.role, kind: "blocked", detail: event.detail ?? "unknown reason" });
           notifyBrowser(`${agent.name} is blocked!`, "blocked-" + event.agentId);
 
           const blockerNode = agentNodeId(event.agentId);
@@ -1145,7 +1076,6 @@ export const useGameState = create<GameState>((set, get) => ({
             currentAction: "idle" as ActionType,
           });
           draft.agents = agents;
-          pushLog({ category: "resolve", agentName: agent.name, agentRole: agent.role, message: "blocker resolved" });
 
           const resolveNode = agentNodeId(event.agentId);
           if (resolveNode) {
@@ -1176,12 +1106,10 @@ export const useGameState = create<GameState>((set, get) => ({
 
       case "dag.node.status": {
         const dag = { ...draft.dag };
-        const node = dag.nodes.find((n) => n.nodeId === event.nodeId);
         dag.nodes = dag.nodes.map((n) =>
           n.nodeId === event.nodeId ? { ...n, status: event.status } : n
         );
         draft.dag = dag;
-        pushLog({ category: "dag", message: `Task '${node?.label ?? event.nodeId}' → ${event.status}` });
 
         if (event.status === "completed") {
           const roomHistory = new Map(draft.roomHistory);
@@ -1197,33 +1125,6 @@ export const useGameState = create<GameState>((set, get) => ({
         const dag = { ...draft.dag };
         dag.edges = [...dag.edges, { from: event.from, to: event.to }];
         draft.dag = dag;
-        break;
-      }
-
-      case "raw.stdout":
-      case "raw.stderr": {
-        try {
-          const decoded = atob(event.data);
-          const clean = decoded.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim();
-          if (clean.length === 0) break;
-
-          const lines = clean.split(/\r?\n/).filter(l => l.trim().length > 0);
-          const agent = draft.agents.get(event.agentId);
-          const newEntries = lines.slice(0, 5).map(line => ({
-            ts,
-            agentId: event.agentId,
-            agentName: agent?.name,
-            agentRole: agent?.role,
-            kind: "tool_end" as const,
-            action: event.type === "raw.stderr" ? "stderr" : "stdout",
-            detail: line.slice(0, 200),
-          }));
-
-          draft.transcript = [...draft.transcript, ...newEntries];
-          if (draft.transcript.length > MAX_TRANSCRIPT) {
-            draft.transcript = draft.transcript.slice(-MAX_TRANSCRIPT);
-          }
-        } catch { /* ignore decode errors */ }
         break;
       }
     }

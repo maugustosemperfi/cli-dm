@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import type { TranscriptEntry } from "../../stores/gameState";
+import { deriveTranscript } from "../../stores/deriveViews";
 import { SearchBar } from "./SearchBar";
 import { VirtualList } from "../VirtualList";
 
@@ -297,7 +298,8 @@ function FilterTabs({ agents, selected, onSelect }: FilterTabsProps) {
 // ── main component ───────────────────────────────────────────────────────────
 
 export function LiveFeed() {
-  const transcript = useGameState((s) => s.transcript);
+  const eventRingVersion = useGameState((s) => s.eventRingVersion);
+  const eventRing = useGameState((s) => s.eventRing);
   const agents = useGameState((s) => s.agents);
   const dag = useGameState((s) => s.dag);
   const selectedAgent = useGameState((s) => s.selectedAgent);
@@ -306,6 +308,11 @@ export function LiveFeed() {
   const searchFilters = useGameState((s) => s.searchFilters);
   const getFilteredTranscript = useGameState((s) => s.getFilteredTranscript);
   const focusOnNode = useGameState((s) => s.focusOnNode);
+
+  const transcript = useMemo(
+    () => deriveTranscript(eventRing, agents),
+    [eventRing, eventRingVersion, agents]
+  );
 
   const feedRef = useRef<HTMLDivElement>(null);
   const [nearBottom, setNearBottom] = useState(true);

@@ -6,7 +6,7 @@ export function StatusBar() {
   const agents = useGameState((s) => s.agents);
   const connected = useGameState((s) => s.connected);
   const dag = useGameState((s) => s.dag);
-  const transcript = useGameState((s) => s.transcript);
+  const transcript = useGameState((s) => s.eventRing.length);
   const clearEvents = useGameState((s) => s.clearEvents);
   const pruneEventsOlderThan = useGameState((s) => s.pruneEventsOlderThan);
   const reducedEffects = useGameState((s) => s.reducedEffects);
@@ -123,7 +123,7 @@ export function StatusBar() {
         Tasks: {tasksCompleted}/{tasksTotal}
       </span>
       <span>Parallelization: {efficiency}%</span>
-      <span title="Transcript entries in memory">Events: {transcript.length}</span>
+      <span title="Events in ring buffer">Events: {transcript}</span>
 
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
         {pruneFeedback && (

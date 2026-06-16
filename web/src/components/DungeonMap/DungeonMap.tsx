@@ -103,10 +103,7 @@ export function DungeonMap() {
   const sceneOverlayRef = useRef<SceneOverlay>(pickSceneOverlay(useGameState.getState()));
   const syncSceneRef = useRef<(dag: DAGSnapshot, agents: Map<string, AgentState>) => void>(() => {});
 
-  const dag = useGameState((s) => s.dag);
-  const agents = useGameState((s) => s.agents);
   const reducedEffects = useGameState((s) => s.reducedEffects);
-  const selectedAgent = useGameState((s) => s.selectedAgent);
   const selectAgent = useGameState((s) => s.selectAgent);
 
   // Initialize PixiJS — wait for container to have real dimensions
@@ -480,6 +477,7 @@ export function DungeonMap() {
         }
         // File attention heatmap — rooms glow by agent activity
         room.setHeat(aa?.activityHeat ?? 0);
+        room.highlight(dn.assignee === useGameState.getState().selectedAgent);
 
         // Context-sensitive decorations
         const rh = roomHistory.get(ln.nodeId);
@@ -1100,26 +1098,51 @@ export function DungeonMap() {
   }, [reducedEffects]);
 
   useEffect(() => {
-    syncScene(dag, agents);
-  }, [dag, agents, syncScene]);
+    const topoKey = (dag: DAGSnapshot) =>
+      dag.nodes.map((n) => n.nodeId).sort().join(",") + "|" +
+      dag.edges.map((e) => `${e.from}>${e.to}`).sort().join(",");
 
-  // Re-sync PixiJS overlays when event-derived state changes without agent/DAG updates
-  useEffect(() => {
+    let lastTopo = topoKey(useGameState.getState().dag);
+    syncSceneRef.current(useGameState.getState().dag, useGameState.getState().agents);
+
     return useGameState.subscribe((s, prev) => {
-      if (
-        s.toolFlows === prev.toolFlows &&
-        s.errorPropagations === prev.errorPropagations &&
-        s.roomMetrics === prev.roomMetrics &&
-        s.burnRates === prev.burnRates &&
-        s.roomHistory === prev.roomHistory &&
-        s.activeLayer === prev.activeLayer
-      ) {
+      const overlayChanged =
+        s.toolFlows !== prev.toolFlows ||
+        s.errorPropagations !== prev.errorPropagations ||
+        s.roomMetrics !== prev.roomMetrics ||
+        s.burnRates !== prev.burnRates ||
+        s.roomHistory !== prev.roomHistory ||
+        s.activeLayer !== prev.activeLayer;
+
+      if (overlayChanged) {
+        sceneOverlayRef.current = pickSceneOverlay(s);
+      }
+
+      const agentsChanged = s.agents !== prev.agents;
+      const dagChanged = s.dag !== prev.dag;
+      const selectedChanged = s.selectedAgent !== prev.selectedAgent;
+      const topo = topoKey(s.dag);
+      const topologyChanged = dagChanged && topo !== lastTopo;
+
+      if (topologyChanged) {
+        lastTopo = topo;
+        syncSceneRef.current(s.dag, s.agents);
         return;
       }
-      sceneOverlayRef.current = pickSceneOverlay(s);
-      syncSceneRef.current(s.dag, s.agents);
+
+      if (agentsChanged || dagChanged || overlayChanged) {
+        syncSceneRef.current(s.dag, s.agents);
+        return;
+      }
+
+      if (selectedChanged) {
+        for (const room of roomsRef.current.values()) {
+          const dn = s.dag.nodes.find((n) => n.nodeId === room.nodeId);
+          room.highlight(dn?.assignee === s.selectedAgent);
+        }
+      }
     });
-  }, []);
+  }, [syncScene]);
 
   const handleMinimapClick = useCallback(
     (worldX: number, worldY: number) => {
@@ -1144,14 +1167,6 @@ export function DungeonMap() {
     focusOnNode(null); // clear after handling
   }, [focusNodeId, focusOnNode]);
 
-  // Cross-highlighting
-  useEffect(() => {
-    for (const room of roomsRef.current.values()) {
-      const dn = dag.nodes.find((n) => n.nodeId === room.nodeId);
-      room.highlight(dn?.assignee === selectedAgent);
-    }
-  }, [selectedAgent, dag]);
-
   if (error) {
     return (
       <div style={{ padding: 20, color: "#bf6b5b", fontFamily: "monospace", fontSize: 13 }}>
@@ -1166,8 +1181,6 @@ export function DungeonMap() {
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       <LayerControls />
       <Minimap
-        dag={dag}
-        agents={agents}
         camera={cameraRef.current}
         onClickWorld={handleMinimapClick}
       />

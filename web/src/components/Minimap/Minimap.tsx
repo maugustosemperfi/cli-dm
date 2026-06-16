@@ -1,6 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import type { DAGSnapshot } from "../../protocol/events";
-import { useGameState, AGENT_COLORS, type AgentState } from "../../stores/gameState";
+import { useGameState, AGENT_COLORS } from "../../stores/gameState";
 import { computeLayout } from "../DungeonMap/layout";
 import type { Camera } from "../DungeonMap/Camera";
 
@@ -9,8 +8,6 @@ const MINIMAP_H = 140;
 const MINIMAP_PAD = 10;
 
 interface MinimapProps {
-  dag: DAGSnapshot;
-  agents: Map<string, AgentState>;
   camera: Camera | null;
   onClickWorld: (worldX: number, worldY: number) => void;
 }
@@ -69,7 +66,9 @@ function drawMinimapBuilding(
   }
 }
 
-export function Minimap({ dag, agents, camera, onClickWorld }: MinimapProps) {
+export function Minimap({ camera, onClickWorld }: MinimapProps) {
+  const dag = useGameState((s) => s.dag);
+  const agents = useGameState((s) => s.agents);
   const roomMetrics = useGameState((s) => s.roomMetrics);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>(0);
