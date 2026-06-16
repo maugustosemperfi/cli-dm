@@ -39,7 +39,7 @@ dev-config:
 dev-config-go:
 	go run ./cmd/cli-dm run --config examples/dungeon.yaml
 
-# Development mode with live Claude Code integration
+# Development mode with live Claude Code/Cursor integration
 dev-live:
 	@echo "Starting CLI_DM with live integration config..."
 	@echo "  Go backend: http://localhost:8420"
@@ -50,7 +50,7 @@ dev-live:
 dev-live-go:
 	go run ./cmd/cli-dm run --config examples/dungeon-live.yaml
 
-# Watch all projects under ~/dev/nu/ with active Claude sessions
+# Watch all projects under ~/dev/nu/ with active Claude Code/Cursor sessions
 dev-watch:
 	@echo "Starting CLI_DM watching ~/dev/nu/..."
 	@echo "  Go backend: http://localhost:8420"

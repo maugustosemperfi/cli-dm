@@ -22,7 +22,7 @@ type Config struct {
 	Agents    []AgentConfig   `yaml:"agents"`
 	Sessions  *SessionsConfig `yaml:"sessions"`
 	HooksAuth string          `yaml:"hooks_auth"` // Auth token for hook receiver
-	WatchDir  string          `yaml:"watch_dir"`  // Auto-discover projects with active sessions under this dir
+	WatchDir  string          `yaml:"watch_dir"`  // Auto-discover projects with active Claude/Cursor sessions under this dir
 	WatchAge  string          `yaml:"watch_age"`  // Max session age for auto-discovery (e.g. "24h", "7d"), default "24h"
 }
 
@@ -36,8 +36,8 @@ type AgentConfig struct {
 
 	// Multi-source support
 	Source    string `yaml:"source"`     // "pty" (default), "stream-json", "hooks", "watch"
-	WatchFile string `yaml:"watch_file"` // For source: watch — path to JSONL file
-	Project   string `yaml:"project"`    // For source: watch — auto-discover session for this project dir
+	WatchFile string `yaml:"watch_file"` // For source: watch — path to JSONL file/transcript
+	Project   string `yaml:"project"`    // For source: watch — auto-discover sessions for this project dir
 }
 
 // LoadConfig reads and validates a dungeon.yaml file.

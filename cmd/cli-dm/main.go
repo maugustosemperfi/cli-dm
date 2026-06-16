@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -562,7 +562,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 				}
 				// Track for snapshot on reconnect
 				externalAgentsMu.Lock()
-				externalAgents[agentID] = struct{ Name string; Role protocol.AgentRole }{name, role}
+				externalAgents[agentID] = struct {
+					Name string
+					Role protocol.AgentRole
+				}{name, role}
 				externalAgentsMu.Unlock()
 				// Emit spawn event manually
 				spawnEv, _ := protocol.NewEvent(protocol.AgentSpawn{
@@ -581,7 +584,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 					// Explicit file path — single watcher
 					watchPath := expandHome(ac.WatchFile)
 					externalAgentsMu.Lock()
-					externalAgents[agentID] = struct{ Name string; Role protocol.AgentRole }{name, role}
+					externalAgents[agentID] = struct {
+						Name string
+						Role protocol.AgentRole
+					}{name, role}
 					externalAgentsMu.Unlock()
 
 					w := ingestion.NewJSONLWatcher(watchPath, agentID, sharedMapper, eventSink, logger)
@@ -629,7 +635,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 						}
 
 						externalAgentsMu.Lock()
-						externalAgents[subAgentID] = struct{ Name string; Role protocol.AgentRole }{subName, subRole}
+						externalAgents[subAgentID] = struct {
+							Name string
+							Role protocol.AgentRole
+						}{subName, subRole}
 						externalAgentsMu.Unlock()
 
 						w := ingestion.NewJSONLWatcher(sess.Path, subAgentID, sharedMapper, eventSink, logger)
@@ -702,7 +711,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 					// Track for snapshot on reconnect
 					externalAgentsMu.Lock()
-					externalAgents[agentID] = struct{ Name string; Role protocol.AgentRole }{name, role}
+					externalAgents[agentID] = struct {
+						Name string
+						Role protocol.AgentRole
+					}{name, role}
 					externalAgentsMu.Unlock()
 
 					w := ingestion.NewJSONLWatcher(proj.SessionPath, agentID, sharedMapper, eventSink, logger)
@@ -827,7 +839,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Periodic session rediscovery — picks up JSONL files created after
-	// startup (e.g. new Claude Code sessions opened in other terminals).
+	// startup (e.g. new Claude Code or Cursor sessions opened elsewhere).
 	if fileCfg != nil {
 		spawnLateWatcher := func(path, name string, role protocol.AgentRole) {
 			watchedPathsMu.Lock()

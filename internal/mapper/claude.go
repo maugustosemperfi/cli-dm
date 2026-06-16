@@ -125,11 +125,11 @@ func (m *Mapper) handleToolStart(te ToolEvent) []protocol.Event {
 		events = append(events, state.MarkBlocked(protocol.BlockerTimeout, "", truncate(detail, 200)))
 	}
 
-	// Agent tool → spawn a subagent character on the map
-	if te.ToolName == "Agent" && te.ToolUseID != "" {
-		name := extractString(te.Input, "name")
+	// Agent/Subagent tool → spawn a subagent character on the map
+	if (te.ToolName == "Agent" || te.ToolName == "Subagent") && te.ToolUseID != "" {
+		name := extractFirstString(te.Input, "name", "description")
 		if name == "" {
-			name = extractString(te.Input, "description")
+			name = extractString(te.Input, "title")
 		}
 		if name == "" {
 			name = fmt.Sprintf("subagent-%d", m.subCount+1)
@@ -232,32 +232,36 @@ func (m *Mapper) handleSessionLife(te ToolEvent) []protocol.Event {
 	return []protocol.Event{ev}
 }
 
-// mapToolName maps a Claude tool name + input to an ActionType and detail string.
+// mapToolName maps a Claude/Cursor tool name + input to an ActionType and detail string.
 func mapToolName(toolName string, input map[string]any) (protocol.ActionType, string) {
 	switch toolName {
-	case "Read":
-		return protocol.ActionRead, extractString(input, "file_path")
-	case "Grep", "Glob":
-		return protocol.ActionRead, extractString(input, "pattern")
-	case "Edit", "Write":
-		return protocol.ActionEdit, extractString(input, "file_path")
-	case "Bash":
+	case "Read", "ReadFile":
+		return protocol.ActionRead, extractFirstString(input, "file_path", "path")
+	case "Grep", "rg":
+		return protocol.ActionRead, extractFirstString(input, "pattern", "path")
+	case "Glob":
+		return protocol.ActionRead, extractFirstString(input, "pattern", "glob_pattern")
+	case "SemanticSearch":
+		return protocol.ActionRead, extractFirstString(input, "query", "path")
+	case "Edit", "Write", "ApplyPatch", "EditNotebook", "Delete":
+		return protocol.ActionEdit, extractFirstString(input, "file_path", "path", "target_file", "target_notebook")
+	case "Bash", "Shell":
 		return classifyBash(input)
-	case "Agent":
-		detail := extractString(input, "description")
+	case "Agent", "Subagent":
+		detail := extractFirstString(input, "description", "prompt")
 		if detail == "" {
 			detail = "spawning agent"
 		}
 		return protocol.ActionBuild, detail
-	case "WebFetch":
-		return protocol.ActionNetwork, extractString(input, "url")
+	case "WebFetch", "CallMcpTool", "FetchMcpResource":
+		return protocol.ActionNetwork, extractFirstString(input, "url", "server", "uri")
 	case "WebSearch":
 		return protocol.ActionNetwork, extractString(input, "query")
 	case "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "SendMessage",
 		"AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 		"NotebookEdit", "Skill", "CronCreate", "CronDelete", "CronList",
 		"TaskOutput", "TaskStop", "TodoWrite",
-		"TeamCreate", "TeamDelete":
+		"TeamCreate", "TeamDelete", "SwitchMode", "AskQuestion", "GenerateImage":
 		return protocol.ActionThinking, extractDetail(toolName, input)
 	case "__thinking__":
 		return protocol.ActionThinking, "reasoning"
@@ -304,6 +308,9 @@ func mapToolName(toolName string, input map[string]any) (protocol.ActionType, st
 func classifyBash(input map[string]any) (protocol.ActionType, string) {
 	cmd := extractString(input, "command")
 	if cmd == "" {
+		cmd = extractString(input, "cmd")
+	}
+	if cmd == "" {
 		return protocol.ActionShell, "bash"
 	}
 
@@ -339,6 +346,15 @@ func extractString(m map[string]any, key string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return s
+}
+
+func extractFirstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if s := extractString(m, key); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // extractDetail builds a display string from tool input for task-related tools.

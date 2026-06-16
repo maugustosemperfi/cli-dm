@@ -59,6 +59,11 @@ type JSONLWatcher struct {
 	// Stale detection: 0=fresh, 1=idle emitted (5min), 2=complete emitted (30min)
 	staleEmitted int
 
+	// Cursor transcripts do not include API usage records. When available,
+	// read Cursor's local composer metadata for the selected model and prompt
+	// token estimate, then emit estimated stats per assistant turn.
+	cursorUsage *cursorUsageReader
+
 	// onStop is invoked exactly once after the poll/sweep goroutines exit, so
 	// the owner (main.go) can release watchedPaths/watchers entries and let the
 	// rediscovery ticker re-engage the session if its JSONL resumes activity.
@@ -79,6 +84,7 @@ func NewJSONLWatcher(filePath, agentID string, mp *mapper.Mapper, sink EventSink
 		firstRead:   true,
 		knownAgents: known,
 		inferStates: make(map[string]*inferredState),
+		cursorUsage: newCursorUsageReader(filePath),
 	}
 }
 
@@ -344,7 +350,9 @@ func (w *JSONLWatcher) poll() {
 			continue
 		}
 
-		// Extract token/cost data from assistant messages → emit stats event
+		// Extract token/cost data from assistant messages → emit stats event.
+		// Cursor transcripts do not carry exact usage; fall back to a per-turn
+		// estimate from local composer metadata when exact usage is absent.
 		var rawEntry map[string]any
 		if json.Unmarshal(line, &rawEntry) == nil {
 			if input, output, cost, ok := mapper.ExtractTokensFromMessage(rawEntry); ok {
@@ -359,6 +367,8 @@ func (w *JSONLWatcher) poll() {
 					CostUSD: cost,
 					Ts:      protocol.NowMs(),
 				})
+				w.eventSink(statsEv)
+			} else if statsEv, ok := w.estimateCursorStats(rawEntry); ok {
 				w.eventSink(statsEv)
 			}
 		}
@@ -458,6 +468,33 @@ func (w *JSONLWatcher) poll() {
 	w.inferActivity()
 }
 
+func (w *JSONLWatcher) estimateCursorStats(rawEntry map[string]any) (protocol.Event, bool) {
+	if w.cursorUsage == nil {
+		return protocol.Event{}, false
+	}
+	role, _ := rawEntry["role"].(string)
+	if role != "assistant" {
+		return protocol.Event{}, false
+	}
+	stats, ok := w.cursorUsage.readStats()
+	if !ok || stats.InputTokens == 0 {
+		return protocol.Event{}, false
+	}
+	outputTokens := estimateCursorOutputTokens(rawEntry)
+	cost := mapper.EstimateCostForModel(stats.ModelName, stats.InputTokens, outputTokens, 0, 0)
+	ev, err := protocol.NewEvent(protocol.AgentStats{
+		Type:    protocol.TypeAgentStats,
+		AgentID: w.agentID,
+		Tokens:  stats.InputTokens + outputTokens,
+		CostUSD: cost,
+		Ts:      protocol.NowMs(),
+	})
+	if err != nil {
+		return protocol.Event{}, false
+	}
+	return ev, true
+}
+
 // getInferState returns (or creates) the inference state for an agent.
 func (w *JSONLWatcher) getInferState(agentID string) *inferredState {
 	s, ok := w.inferStates[agentID]
@@ -524,10 +561,16 @@ func (w *JSONLWatcher) formatForTerminal(line []byte) string {
 	}
 
 	msgType, _ := entry["type"].(string)
+	if msgType == "" {
+		msgType, _ = entry["role"].(string)
+	}
 	ts, _ := entry["timestamp"].(string)
 	timeStr := ""
 	if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 		timeStr = t.Local().Format("15:04:05")
+	}
+	if timeStr == "" {
+		timeStr = time.Now().Format("15:04:05")
 	}
 
 	switch msgType {
@@ -624,7 +667,8 @@ func (w *JSONLWatcher) formatForTerminal(line []byte) string {
 			}
 			blockType, _ := block["type"].(string)
 
-			if blockType == "tool_result" {
+			switch blockType {
+			case "tool_result":
 				resultText, _ := block["content"].(string)
 				isError, _ := block["is_error"].(bool)
 				if resultText != "" {
@@ -639,6 +683,11 @@ func (w *JSONLWatcher) formatForTerminal(line []byte) string {
 						prefix = "  ✗"
 					}
 					parts = append(parts, fmt.Sprintf("\033[%sm%s %s\033[0m", color, prefix, resultText))
+				}
+			case "text":
+				text, _ := block["text"].(string)
+				if text != "" && len(text) < 300 {
+					parts = append(parts, fmt.Sprintf("\033[32m❯ %s\033[0m", text))
 				}
 			}
 		}
@@ -660,8 +709,11 @@ func (w *JSONLWatcher) formatForTerminal(line []byte) string {
 // formatToolDetail creates a short description from tool name + input.
 func formatToolDetail(name string, input map[string]any) string {
 	switch name {
-	case "Read":
+	case "Read", "ReadFile":
 		if fp, ok := input["file_path"].(string); ok {
+			return fp
+		}
+		if fp, ok := input["path"].(string); ok {
 			return fp
 		}
 	case "Edit":
@@ -672,14 +724,24 @@ func formatToolDetail(name string, input map[string]any) string {
 		if fp, ok := input["file_path"].(string); ok {
 			return fp
 		}
-	case "Bash":
+	case "EditNotebook":
+		if fp, ok := input["target_notebook"].(string); ok {
+			return fp
+		}
+	case "Delete":
+		if fp, ok := input["path"].(string); ok {
+			return fp
+		}
+	case "ApplyPatch":
+		return "patch"
+	case "Bash", "Shell":
 		if cmd, ok := input["command"].(string); ok {
 			if len(cmd) > 120 {
 				cmd = cmd[:120] + "..."
 			}
 			return cmd
 		}
-	case "Grep":
+	case "Grep", "rg":
 		if p, ok := input["pattern"].(string); ok {
 			return fmt.Sprintf("/%s/", p)
 		}
@@ -687,8 +749,17 @@ func formatToolDetail(name string, input map[string]any) string {
 		if p, ok := input["pattern"].(string); ok {
 			return p
 		}
-	case "Agent":
+		if p, ok := input["glob_pattern"].(string); ok {
+			return p
+		}
+	case "Agent", "Subagent":
 		if d, ok := input["description"].(string); ok {
+			return d
+		}
+		if d, ok := input["prompt"].(string); ok {
+			if len(d) > 120 {
+				d = d[:120] + "..."
+			}
 			return d
 		}
 	case "WebSearch":
@@ -698,6 +769,12 @@ func formatToolDetail(name string, input map[string]any) string {
 	case "WebFetch":
 		if u, ok := input["url"].(string); ok {
 			return u
+		}
+	case "CallMcpTool":
+		server, _ := input["server"].(string)
+		toolName, _ := input["toolName"].(string)
+		if server != "" && toolName != "" {
+			return server + "/" + toolName
 		}
 	case "TaskCreate":
 		if s, ok := input["subject"].(string); ok {

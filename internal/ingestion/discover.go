@@ -17,7 +17,8 @@ type DiscoveredSession struct {
 
 // DiscoverActiveSession finds the most recently modified JSONL session file
 // for the given project directory. Claude Code stores session files under
-// ~/.claude/projects/<encoded-project-path>/.
+// ~/.claude/projects/<encoded-project-path>/, while Cursor stores transcripts
+// under ~/.cursor/projects/<encoded-project-path>/agent-transcripts/.
 func DiscoverActiveSession(projectDir string) (string, error) {
 	sessions, err := DiscoverActiveSessions(projectDir, 0)
 	if err != nil {
@@ -25,51 +26,42 @@ func DiscoverActiveSession(projectDir string) (string, error) {
 	}
 	if len(sessions) == 0 {
 		homeDir, _ := os.UserHomeDir()
-		encoded := encodeProjectPath(projectDir)
-		return "", fmt.Errorf("no JSONL session files found in %s", filepath.Join(homeDir, ".claude", "projects", encoded))
+		absProject, _ := filepath.Abs(projectDir)
+		return "", fmt.Errorf("no JSONL session files found in %s or %s",
+			filepath.Join(claudeProjectsRoot(homeDir), encodeProjectPath(absProject)),
+			filepath.Join(cursorProjectsRoot(homeDir), encodeCursorProjectPath(absProject), "agent-transcripts"))
 	}
 	return sessions[0].Path, nil
 }
 
-// DiscoverActiveSessions finds ALL recently modified JSONL session files for
-// the given project directory. If maxAge is 0, all files are returned.
+// DiscoverActiveSessions finds ALL recently modified JSONL session files or
+// Cursor transcript files for the given project directory. If maxAge is 0,
+// all files are returned.
 // Results are sorted by modification time (newest first).
 func DiscoverActiveSessions(projectDir string, maxAge time.Duration) ([]DiscoveredSession, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home dir: %w", err)
 	}
-
-	encoded := encodeProjectPath(projectDir)
-	projectSessionDir := filepath.Join(homeDir, ".claude", "projects", encoded)
-
-	entries, err := os.ReadDir(projectSessionDir)
+	absProject, err := filepath.Abs(projectDir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read session dir %s: %w", projectSessionDir, err)
-	}
-
-	cutoff := time.Time{}
-	if maxAge > 0 {
-		cutoff = time.Now().Add(-maxAge)
+		return nil, fmt.Errorf("resolving project dir: %w", err)
 	}
 
 	var sessions []DiscoveredSession
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if maxAge > 0 && info.ModTime().Before(cutoff) {
-			continue
-		}
-		sessions = append(sessions, DiscoveredSession{
-			Path:    filepath.Join(projectSessionDir, entry.Name()),
-			ModTime: info.ModTime(),
-		})
+	claudeDir := filepath.Join(claudeProjectsRoot(homeDir), encodeProjectPath(absProject))
+	claudeSessions, err := collectJSONLSessions(claudeDir, maxAge, false)
+	if err != nil {
+		return nil, err
 	}
+	sessions = append(sessions, claudeSessions...)
+
+	cursorDir := filepath.Join(cursorProjectsRoot(homeDir), encodeCursorProjectPath(absProject), "agent-transcripts")
+	cursorSessions, err := collectJSONLSessions(cursorDir, maxAge, true)
+	if err != nil {
+		return nil, err
+	}
+	sessions = append(sessions, cursorSessions...)
 
 	// Sort newest first
 	sort.Slice(sessions, func(i, j int) bool {
@@ -89,7 +81,91 @@ func encodeProjectPath(dir string) string {
 	return s
 }
 
-// DiscoveredProject represents a project directory that has an active Claude session.
+func claudeProjectsRoot(homeDir string) string {
+	if override := os.Getenv("CLI_DM_CLAUDE_PROJECTS_DIR"); override != "" {
+		return override
+	}
+	return filepath.Join(homeDir, ".claude", "projects")
+}
+
+func cursorProjectsRoot(homeDir string) string {
+	if override := os.Getenv("CLI_DM_CURSOR_PROJECTS_DIR"); override != "" {
+		return override
+	}
+	return filepath.Join(homeDir, ".cursor", "projects")
+}
+
+// encodeCursorProjectPath converts an absolute path to Cursor's project folder
+// convention: trim the leading slash, then replace "/" and "." with "-".
+// Example: "/Users/marcos.augusto/dev/nu" → "Users-marcos-augusto-dev-nu".
+func encodeCursorProjectPath(dir string) string {
+	s := filepath.Clean(dir)
+	s = strings.TrimPrefix(s, string(filepath.Separator))
+	s = strings.ReplaceAll(s, string(filepath.Separator), "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	return s
+}
+
+// collectJSONLSessions returns JSONL files under root, optionally recursively.
+// Missing roots are expected when only one of Claude Code/Cursor has been used.
+func collectJSONLSessions(root string, maxAge time.Duration, recursive bool) ([]DiscoveredSession, error) {
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("cannot read session dir %s: %w", root, err)
+	}
+
+	cutoff := time.Time{}
+	if maxAge > 0 {
+		cutoff = time.Now().Add(-maxAge)
+	}
+
+	addIfSession := func(path string, info os.FileInfo, sessions *[]DiscoveredSession) {
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".jsonl") {
+			return
+		}
+		if maxAge > 0 && info.ModTime().Before(cutoff) {
+			return
+		}
+		*sessions = append(*sessions, DiscoveredSession{Path: path, ModTime: info.ModTime()})
+	}
+
+	var sessions []DiscoveredSession
+	if recursive {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return nil
+			}
+			addIfSession(path, info, &sessions)
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walking session dir %s: %w", root, err)
+		}
+		return sessions, nil
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read session dir %s: %w", root, err)
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		addIfSession(filepath.Join(root, entry.Name()), info, &sessions)
+	}
+	return sessions, nil
+}
+
+// DiscoveredProject represents a project directory that has an active AI-agent
+// JSONL session.
 type DiscoveredProject struct {
 	ProjectDir  string    // absolute path to the project directory
 	ProjectName string    // basename (e.g. "mini-meta-repo")
@@ -98,8 +174,7 @@ type DiscoveredProject struct {
 }
 
 // DiscoverProjectsInDir scans a parent directory for subdirectories that have
-// active Claude Code sessions. It checks ~/.claude/projects/ for matching
-// session directories and returns projects with recent JSONL files.
+// active Claude Code sessions or Cursor agent transcripts.
 //
 // maxAge controls how old a session can be to still count (0 = no limit).
 func DiscoverProjectsInDir(parentDir string, maxAge time.Duration) ([]DiscoveredProject, error) {
@@ -112,80 +187,94 @@ func DiscoverProjectsInDir(parentDir string, maxAge time.Duration) ([]Discovered
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home dir: %w", err)
 	}
-	claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
-
-	// Read all Claude project session directories
-	claudeEntries, err := os.ReadDir(claudeProjectsDir)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", claudeProjectsDir, err)
-	}
-
-	// Build a map of encoded-path → claude session dir
-	encodedPrefix := encodeProjectPath(absParent)
 
 	var results []DiscoveredProject
-	cutoff := time.Now().Add(-maxAge)
 
-	for _, ce := range claudeEntries {
-		if !ce.IsDir() {
+	claudeProjectsDir := claudeProjectsRoot(homeDir)
+	if claudeProjects, err := discoverProjectsFromSessionRoots(
+		claudeProjectsDir,
+		encodeProjectPath(absParent),
+		absParent,
+		maxAge,
+		false,
+	); err != nil {
+		return nil, err
+	} else {
+		results = append(results, claudeProjects...)
+	}
+
+	cursorProjectsDir := cursorProjectsRoot(homeDir)
+	if cursorProjects, err := discoverProjectsFromSessionRoots(
+		cursorProjectsDir,
+		encodeCursorProjectPath(absParent),
+		absParent,
+		maxAge,
+		true,
+	); err != nil {
+		return nil, err
+	} else {
+		results = append(results, cursorProjects...)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ModTime.After(results[j].ModTime)
+	})
+	return results, nil
+}
+
+func discoverProjectsFromSessionRoots(root, encodedPrefix, absParent string, maxAge time.Duration, cursor bool) ([]DiscoveredProject, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("cannot read %s: %w", root, err)
+	}
+
+	var results []DiscoveredProject
+	for _, entry := range entries {
+		if !entry.IsDir() {
 			continue
 		}
-		dirName := ce.Name()
-
-		// Check if this session dir is for a project under our parent dir.
-		// The encoding is lossy (both / and . become -), so we match by prefix.
-		if !strings.HasPrefix(dirName, encodedPrefix) {
+		dirName := entry.Name()
+		if dirName != encodedPrefix && !strings.HasPrefix(dirName, encodedPrefix+"-") {
 			continue
 		}
 
-		// Extract the project name: everything after the parent prefix.
-		// e.g. prefix="-Users-marcos-augusto-dev-nu-" dirName="-Users-marcos-augusto-dev-nu-mini-meta-repo"
-		// → suffix = "mini-meta-repo"
-		suffix := strings.TrimPrefix(dirName, encodedPrefix)
-		if suffix == "" {
-			continue
+		projectName, projectDir := projectFromEncodedDir(dirName, encodedPrefix, absParent)
+		sessionDir := filepath.Join(root, dirName)
+		recursive := false
+		if cursor {
+			sessionDir = filepath.Join(sessionDir, "agent-transcripts")
+			recursive = true
 		}
-		projectName := suffix
 
-		// Find the most recent JSONL in this session dir
-		sessionDir := filepath.Join(claudeProjectsDir, dirName)
-		entries, err := os.ReadDir(sessionDir)
+		sessions, err := collectJSONLSessions(sessionDir, maxAge, recursive)
 		if err != nil {
 			continue
 		}
-
-		var bestPath string
-		var bestTime time.Time
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(bestTime) {
-				bestTime = info.ModTime()
-				bestPath = filepath.Join(sessionDir, entry.Name())
-			}
-		}
-
-		if bestPath == "" {
+		if len(sessions) == 0 {
 			continue
 		}
-
-		// Filter by age
-		if maxAge > 0 && bestTime.Before(cutoff) {
-			continue
-		}
+		sort.Slice(sessions, func(i, j int) bool {
+			return sessions[i].ModTime.After(sessions[j].ModTime)
+		})
 
 		results = append(results, DiscoveredProject{
-			ProjectDir:  filepath.Join(absParent, projectName),
+			ProjectDir:  projectDir,
 			ProjectName: projectName,
-			SessionPath: bestPath,
-			ModTime:     bestTime,
+			SessionPath: sessions[0].Path,
+			ModTime:     sessions[0].ModTime,
 		})
 	}
-
 	return results, nil
+}
+
+func projectFromEncodedDir(dirName, encodedPrefix, absParent string) (string, string) {
+	suffix := strings.TrimPrefix(dirName, encodedPrefix)
+	suffix = strings.TrimPrefix(suffix, "-")
+	if suffix == "" {
+		return filepath.Base(absParent), absParent
+	}
+	return suffix, filepath.Join(absParent, suffix)
 }

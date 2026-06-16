@@ -7,7 +7,8 @@ import (
 )
 
 // ParseStreamLine parses a single JSONL line from Claude Code's stream-json
-// output (or JSONL session file) and returns ToolEvents for the mapper.
+// output, Claude Code JSONL session files, or Cursor agent transcripts and
+// returns ToolEvents for the mapper.
 //
 // It handles two main message types:
 //   - "assistant": contains tool_use blocks (→ ToolStart) and thinking blocks
@@ -26,6 +27,11 @@ func ParseStreamLine(line []byte, agentID string) ([]ToolEvent, error) {
 	}
 
 	msgType, _ := raw["type"].(string)
+	if msgType == "" {
+		if role, _ := raw["role"].(string); role != "" {
+			return parseCursorRoleMessage(raw, role, agentID)
+		}
+	}
 
 	switch msgType {
 	case "assistant":
@@ -51,6 +57,62 @@ func ParseStreamLine(line []byte, agentID string) ([]ToolEvent, error) {
 		})
 		return nil, nil
 	}
+}
+
+func parseCursorRoleMessage(raw map[string]any, role string, agentID string) ([]ToolEvent, error) {
+	switch role {
+	case "assistant":
+		return parseAssistant(raw, agentID)
+	case "user":
+		return parseCursorUser(raw, agentID)
+	default:
+		return nil, nil
+	}
+}
+
+func parseCursorUser(raw map[string]any, agentID string) ([]ToolEvent, error) {
+	message, _ := raw["message"].(map[string]any)
+	if message == nil {
+		return nil, nil
+	}
+
+	contentRaw, ok := message["content"]
+	if !ok {
+		return nil, nil
+	}
+
+	contentArr, ok := toSlice(contentRaw)
+	if !ok {
+		if s, isStr := contentRaw.(string); isStr && len(s) > 0 {
+			return []ToolEvent{{
+				Kind:     ToolStart,
+				AgentID:  agentID,
+				ToolName: "__user_input__",
+				Input:    map[string]any{"text_length": len(s)},
+			}}, nil
+		}
+		return nil, nil
+	}
+
+	var textLen int
+	for _, item := range contentArr {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if blockType, _ := block["type"].(string); blockType == "text" {
+			textLen += len(stringVal(block, "text"))
+		}
+	}
+	if textLen == 0 {
+		return nil, nil
+	}
+	return []ToolEvent{{
+		Kind:     ToolStart,
+		AgentID:  agentID,
+		ToolName: "__user_input__",
+		Input:    map[string]any{"text_length": textLen},
+	}}, nil
 }
 
 func parseAssistant(raw map[string]any, agentID string) ([]ToolEvent, error) {
@@ -116,10 +178,10 @@ func parseAssistant(raw map[string]any, agentID string) ([]ToolEvent, error) {
 
 		default:
 			GetUnknownLogger().Log(UnknownEntry{
-				Reason:   "unknown_block",
-				Type:     blockType,
-				AgentID:  agentID,
-				RawData:  block,
+				Reason:  "unknown_block",
+				Type:    blockType,
+				AgentID: agentID,
+				RawData: block,
 			})
 		}
 	}
@@ -309,9 +371,9 @@ type ModelPricing struct {
 // dated variants like "claude-opus-4-7-20260201" resolve to "claude-opus-4-7".
 var modelPricing = map[string]ModelPricing{
 	// Opus 4.5 / 4.6 / 4.7 — current flagship rate card
-	"claude-opus-4-7":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-6":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-5":   {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	"claude-opus-4-7": {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	"claude-opus-4-6": {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
+	"claude-opus-4-5": {Input: 5.0, Output: 25.0, CacheRead: 0.50, CacheWrite: 6.25},
 	// Opus 4 / 4.1 — legacy higher pricing
 	"claude-opus-4-1": {Input: 15.0, Output: 75.0, CacheRead: 1.50, CacheWrite: 18.75},
 	"claude-opus-4":   {Input: 15.0, Output: 75.0, CacheRead: 1.50, CacheWrite: 18.75},
@@ -322,6 +384,25 @@ var modelPricing = map[string]ModelPricing{
 	// Haiku 4.5
 	"claude-haiku-4-5": {Input: 1.0, Output: 5.0, CacheRead: 0.10, CacheWrite: 1.25},
 	"claude-haiku-3-5": {Input: 0.80, Output: 4.0, CacheRead: 0.08, CacheWrite: 1.0},
+	// OpenAI models exposed through Cursor's API pool.
+	"gpt-5.5":            {Input: 5.0, Output: 30.0, CacheRead: 0.50, CacheWrite: 0},
+	"gpt-5.4-mini":       {Input: 0.75, Output: 4.5, CacheRead: 0.075, CacheWrite: 0},
+	"gpt-5.4-nano":       {Input: 0.20, Output: 1.25, CacheRead: 0.020, CacheWrite: 0},
+	"gpt-5.4":            {Input: 2.5, Output: 15.0, CacheRead: 0.25, CacheWrite: 0},
+	"gpt-5.3-codex":      {Input: 1.75, Output: 14.0, CacheRead: 0.175, CacheWrite: 0},
+	"gpt-5.2-codex":      {Input: 1.75, Output: 14.0, CacheRead: 0.175, CacheWrite: 0},
+	"gpt-5.2":            {Input: 1.75, Output: 14.0, CacheRead: 0.175, CacheWrite: 0},
+	"gpt-5.1-codex-mini": {Input: 0.25, Output: 2.0, CacheRead: 0.025, CacheWrite: 0},
+	"gpt-5.1-codex":      {Input: 1.25, Output: 10.0, CacheRead: 0.125, CacheWrite: 0},
+	"gpt-5-codex":        {Input: 1.25, Output: 10.0, CacheRead: 0.125, CacheWrite: 0},
+	"gpt-5-mini":         {Input: 0.25, Output: 2.0, CacheRead: 0.025, CacheWrite: 0},
+	"gpt-5":              {Input: 1.25, Output: 10.0, CacheRead: 0.125, CacheWrite: 0},
+	// Cursor's Auto + Composer pool.
+	"cursor-auto":    {Input: 1.25, Output: 6.0, CacheRead: 0.25, CacheWrite: 1.25},
+	"cursor-default": {Input: 1.25, Output: 6.0, CacheRead: 0.25, CacheWrite: 1.25},
+	"composer-2":     {Input: 0.50, Output: 2.50, CacheRead: 0.20, CacheWrite: 0},
+	"composer-1.5":   {Input: 3.50, Output: 17.50, CacheRead: 0.35, CacheWrite: 0},
+	"composer-1":     {Input: 1.25, Output: 10.0, CacheRead: 0.125, CacheWrite: 0},
 }
 
 // defaultPricing is used when the JSONL entry omits `model` or the ID is
@@ -348,6 +429,20 @@ func pricingForModel(model string) ModelPricing {
 		return modelPricing[bestKey]
 	}
 	return defaultPricing
+}
+
+// EstimateCostForModel estimates USD cost for token counts using the same
+// model rate table as ExtractTokensFromMessage.
+func EstimateCostForModel(model string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64) float64 {
+	p := pricingForModel(model)
+	plainInput := float64(inputTokens - cacheReadTokens)
+	if plainInput < 0 {
+		plainInput = 0
+	}
+	return (plainInput * p.Input / 1_000_000) +
+		(float64(outputTokens) * p.Output / 1_000_000) +
+		(float64(cacheReadTokens) * p.CacheRead / 1_000_000) +
+		(float64(cacheWriteTokens) * p.CacheWrite / 1_000_000)
 }
 
 // ExtractTokensFromMessage extracts usage data from an assistant message.
@@ -378,17 +473,7 @@ func ExtractTokensFromMessage(raw map[string]any) (int64, int64, float64, bool) 
 	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
 	cacheWrite, _ := usage["cache_creation_input_tokens"].(float64)
 
-	p := pricingForModel(modelID)
-
-	// Non-cached input = total input minus cache hits
-	plainInput := input - cacheRead
-	if plainInput < 0 {
-		plainInput = 0
-	}
-	cost := (plainInput * p.Input / 1_000_000) +
-		(output * p.Output / 1_000_000) +
-		(cacheRead * p.CacheRead / 1_000_000) +
-		(cacheWrite * p.CacheWrite / 1_000_000)
+	cost := EstimateCostForModel(modelID, int64(input), int64(output), int64(cacheRead), int64(cacheWrite))
 
 	return int64(input), int64(output), cost, input > 0 || output > 0
 }

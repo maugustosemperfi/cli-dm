@@ -1,10 +1,10 @@
-# Example: Mixed source modes — connect CLI_DM to real Claude Code sessions
+# Example: Mixed source modes — connect CLI_DM to real Claude Code or Cursor sessions
 #
 # Source modes:
 #   pty          — spawn a shell command via PTY (default, original behavior)
 #   stream-json  — spawn claude with --output-format stream-json for structured events
 #   hooks        — receive events from Claude Code hook scripts (live interactive sessions)
-#   watch        — tail a Claude Code JSONL session log file
+#   watch        — tail a Claude Code JSONL session log file or Cursor transcript
 
 adapter: claude
 port: 8420
@@ -33,9 +33,10 @@ agents:
   #   role: mage
   #   source: watch
   #   watch_file: "~/.claude/projects/-Users-marcos-dev-myproject/abc123.jsonl"
+  #   # or: "~/.cursor/projects/Users-marcos-dev-myproject/agent-transcripts/<id>/<id>.jsonl"
   #   task: "Write Docs"
 
-  # Source D with auto-discovery: finds the most recent session for a project
+  # Source D with auto-discovery: finds recent Claude Code and Cursor sessions for a project
   - name: "Green Ranger"
     role: ranger
     source: watch
