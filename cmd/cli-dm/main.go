@@ -519,6 +519,30 @@ func runServer(cmd *cobra.Command, args []string) error {
 		for _, ac := range fileCfg.Agents {
 			if strings.ToLower(ac.Source) == "hooks" {
 				hookReceiver = ingestion.NewHookReceiver(sharedMapper, eventSink, fileCfg.HooksAuth, logger)
+				hookReceiver.SetAgentProvisioner(func(agentID, name string, role protocol.AgentRole) string {
+					taskID := fmt.Sprintf("hook-%s", agentID)
+					if err := taskGraph.AddNode(taskID, name, agentID); err != nil {
+						logger.Warn("hook agent DAG node already exists", "task", taskID, "agent", agentID)
+						return taskID
+					}
+
+					externalAgentsMu.Lock()
+					externalAgents[agentID] = struct {
+						Name string
+						Role protocol.AgentRole
+					}{name, role}
+					externalAgentsMu.Unlock()
+
+					agentToTask[agentID] = taskID
+
+					// AgentSpawn alone does not mutate the DAG on the client — push a snapshot.
+					if snapEv, err := protocol.NewEvent(buildSnapshot()); err == nil {
+						hub.Broadcast(snapEv)
+					}
+
+					logger.Info("provisioned hook agent", "agent", agentID, "task", taskID, "name", name)
+					return taskID
+				})
 				break
 			}
 		}

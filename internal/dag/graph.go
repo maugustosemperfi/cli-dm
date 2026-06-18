@@ -2,6 +2,7 @@ package dag
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/marcosaugustodev/cli-dm/internal/protocol"
@@ -177,6 +178,9 @@ func (g *Graph) Snapshot() protocol.DAGSnapshot {
 			Assignee: n.Assignee,
 		})
 	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].NodeID < nodes[j].NodeID
+	})
 
 	edges := make([]protocol.DAGEdgeSnapshot, 0, len(g.edges))
 	for _, e := range g.edges {

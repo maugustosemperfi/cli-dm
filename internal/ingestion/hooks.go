@@ -19,6 +19,10 @@ type agentMeta struct {
 	Role protocol.AgentRole
 }
 
+// HookAgentProvisioner creates a DAG task node for a dynamically discovered hook
+// agent (e.g. cursor-dm-relay). Returns the task ID assigned to the agent.
+type HookAgentProvisioner func(agentID, name string, role protocol.AgentRole) string
+
 // HookReceiver is an HTTP handler that receives Claude Code hook events
 // (PostToolUse, PreToolUse, SessionStart, Stop, etc.) and converts them
 // into protocol events via the shared Mapper.
@@ -32,6 +36,7 @@ type HookReceiver struct {
 	authToken    string
 	nextByPrefix map[string]int // per-source agent counter ("claude", "cursor", …)
 	nextSubSeq   int
+	provisionAgent HookAgentProvisioner
 }
 
 // NewHookReceiver creates a HookReceiver. If token is non-empty, incoming
@@ -46,6 +51,10 @@ func NewHookReceiver(mp *mapper.Mapper, sink EventSink, token string, logger *sl
 		authToken:    token,
 		nextByPrefix: make(map[string]int),
 	}
+}
+
+func (h *HookReceiver) SetAgentProvisioner(fn HookAgentProvisioner) {
+	h.provisionAgent = fn
 }
 
 // RegisterAgent pre-registers a known agent mapping from a Claude session ID
@@ -126,7 +135,13 @@ func (h *HookReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := h.resolveAgent(hp.Payload)
+	var agentID string
+	switch hp.HookType {
+	case "SubagentStart", "SubagentStop":
+		agentID = h.resolveSubagent(hp.HookType, hp.Payload)
+	default:
+		agentID = h.resolveAgent(hp.Payload)
+	}
 
 	te := h.buildToolEvent(hp.HookType, hp.Payload, agentID)
 	if te == nil {
@@ -188,12 +203,18 @@ func (h *HookReceiver) resolveAgent(payload map[string]any) string {
 
 	h.agentInfo[agentID] = agentMeta{Name: name, Role: role}
 
+	taskID := ""
+	if h.provisionAgent != nil {
+		taskID = h.provisionAgent(agentID, name, role)
+	}
+
 	// Emit spawn event
 	ev, err := protocol.NewEvent(protocol.AgentSpawn{
 		Type:    protocol.TypeAgentSpawn,
 		AgentID: agentID,
 		Name:    name,
 		Role:    role,
+		TaskID:  taskID,
 		Ts:      protocol.NowMs(),
 	})
 	if err == nil {
@@ -201,6 +222,46 @@ func (h *HookReceiver) resolveAgent(payload map[string]any) string {
 	}
 
 	return agentID
+}
+
+// resolveSubagent maps a Cursor/Claude subagent session to a composite agent ID
+// (parentAgentID:subUUID) so the UI can position it inside the parent's room.
+func (h *HookReceiver) resolveSubagent(hookType string, payload map[string]any) string {
+	subSessionID, _ := payload["session_id"].(string)
+	if subSessionID == "" {
+		return "unknown-sub"
+	}
+
+	h.mu.RLock()
+	if mapped, ok := h.sessionMap[subSessionID]; ok {
+		h.mu.RUnlock()
+		return mapped
+	}
+	h.mu.RUnlock()
+
+	subRawID := stringFromMap(payload, "agent_id")
+	if subRawID == "" {
+		subRawID = subSessionID
+	}
+
+	parentAgentID := "orphan"
+	if parentSessionID := stringFromMap(payload, "parent_session_id"); parentSessionID != "" {
+		h.mu.RLock()
+		if pid, ok := h.sessionMap[parentSessionID]; ok {
+			parentAgentID = pid
+		}
+		h.mu.RUnlock()
+	}
+
+	compositeID := parentAgentID + ":" + subRawID
+
+	if hookType == "SubagentStart" {
+		h.mu.Lock()
+		h.sessionMap[subSessionID] = compositeID
+		h.mu.Unlock()
+	}
+
+	return compositeID
 }
 
 func hookSourcePrefix(payload map[string]any) string {
@@ -266,11 +327,6 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 		}
 
 	case "SubagentStart":
-		// Spawn a new subagent character
-		subAgentID := stringFromMap(payload, "agent_id")
-		if subAgentID == "" {
-			subAgentID = fmt.Sprintf("%s-sub-%d", agentID, h.nextSubID(agentID))
-		}
 		subName := stringFromMap(payload, "agent_name")
 		if subName == "" {
 			subName = stringFromMap(payload, "description")
@@ -278,21 +334,20 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 		if subName == "" {
 			subName = "subagent"
 		}
-		h.spawnSubagent(subAgentID, subName)
+		h.spawnSubagent(agentID, subName)
 		return &mapper.ToolEvent{
 			Kind:    mapper.SessionLife,
-			AgentID: subAgentID,
+			AgentID: agentID,
 			IsStart: true,
 		}
 
 	case "SubagentStop":
-		subAgentID := stringFromMap(payload, "agent_id")
-		if subAgentID == "" {
+		if agentID == "" || agentID == "unknown-sub" {
 			return nil
 		}
 		return &mapper.ToolEvent{
 			Kind:    mapper.SessionLife,
-			AgentID: subAgentID,
+			AgentID: agentID,
 			IsStart: false,
 		}
 

@@ -84,8 +84,13 @@ export function computeLayout(
     return { nodes: [], edges: [], width: 0, height: 0, gridCols: 0, gridRows: 0 };
   }
 
-  const N = dag.nodes.length;
-  const hasEdges = dag.edges.length > 0;
+  // Stable ordering — backend snapshots may arrive in arbitrary order; grid slots
+  // are index-based so sort here to keep room positions fixed across recomputes.
+  const nodes = [...dag.nodes].sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+  const dagSorted: DAGSnapshot = { nodes, edges: dag.edges };
+
+  const N = nodes.length;
+  const hasEdges = dagSorted.edges.length > 0;
   const nodeMap = new Map<string, LayoutNode>();
   const layoutNodes: LayoutNode[] = [];
   let gridCols: number;
@@ -100,11 +105,11 @@ export function computeLayout(
   // Build adjacency for leaf detection
   const outgoing = new Map<string, string[]>();
   const incoming = new Map<string, string[]>();
-  for (const node of dag.nodes) {
+  for (const node of nodes) {
     outgoing.set(node.nodeId, []);
     incoming.set(node.nodeId, []);
   }
-  for (const edge of dag.edges) {
+  for (const edge of dagSorted.edges) {
     outgoing.get(edge.from)?.push(edge.to);
     incoming.get(edge.to)?.push(edge.from);
   }
@@ -115,7 +120,7 @@ export function computeLayout(
     gridRows = Math.ceil(N / gridCols);
 
     for (let i = 0; i < N; i++) {
-      const nodeId = dag.nodes[i].nodeId;
+      const nodeId = nodes[i].nodeId;
       const col = i % gridCols;
       const row = Math.floor(i / gridCols);
       const hash = hashStr(nodeId);
@@ -147,7 +152,7 @@ export function computeLayout(
     // ── Has edges — topological BFS with organic placement ──────────────
     const depth = new Map<string, number>();
     const inDegree = new Map<string, number>();
-    for (const node of dag.nodes) {
+    for (const node of nodes) {
       inDegree.set(node.nodeId, incoming.get(node.nodeId)?.length ?? 0);
     }
 
@@ -180,7 +185,7 @@ export function computeLayout(
     }
 
     // Handle orphan nodes not reached by BFS
-    for (const node of dag.nodes) {
+    for (const node of nodes) {
       if (!depth.has(node.nodeId)) {
         depth.set(node.nodeId, 0);
       }
@@ -281,7 +286,7 @@ export function computeLayout(
 
   // ── Build edges with resolved positions ─────────────────────────────────
   const layoutEdges: LayoutEdge[] = [];
-  for (const edge of dag.edges) {
+  for (const edge of dagSorted.edges) {
     const from = nodeMap.get(edge.from);
     const to = nodeMap.get(edge.to);
     if (from && to) {

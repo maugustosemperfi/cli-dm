@@ -136,7 +136,7 @@ export class AgentSprite extends Container {
   private frameIndex = 0;
   private frameTimer = 0;
   private facingLeft = false;
-  private prevX = 0;
+  private prevBaseX = 0;
   private speechBubble: SpeechBubble;
 
   // Base position (center of assigned room)
@@ -488,6 +488,13 @@ export class AgentSprite extends Container {
         (Math.abs(x - this.layoutX) > 1 || Math.abs(y - this.layoutY) > 1)) {
       this.manuallyPositioned = false;
     }
+
+    // Skip no-op updates — syncAgents calls moveTo every frame with the same
+    // room center, which was re-triggering interpolation and fighting bob anims.
+    if (Math.abs(x - this.layoutX) < 0.5 && Math.abs(y - this.layoutY) < 0.5) {
+      return;
+    }
+
     this.layoutX = x;
     this.layoutY = y;
     this.homeX = x;
@@ -683,11 +690,12 @@ export class AgentSprite extends Container {
     const finalX = this.baseX + ox + combatOx;
     const finalY = this.baseY + oy + combatOy;
 
-    // Detect facing direction from horizontal movement
-    const dx = finalX - this.prevX;
-    if (dx < -0.5) this.facingLeft = true;
-    if (dx > 0.5) this.facingLeft = false;
-    this.prevX = finalX;
+    // Face the direction of actual travel, not idle bob offsets (read/search tools
+    // sway ±14px horizontally which was flipping the sprite every frame).
+    const baseDx = this.baseX - this.prevBaseX;
+    if (baseDx < -0.5) this.facingLeft = true;
+    if (baseDx > 0.5) this.facingLeft = false;
+    this.prevBaseX = this.baseX;
 
     // Flip sprite for facing
     this.characterSprite.scale.x = this.facingLeft ? -1 : 1;

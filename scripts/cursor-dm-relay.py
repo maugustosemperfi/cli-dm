@@ -49,18 +49,21 @@ def _encode_cursor_path(path: str) -> str:
     return s.replace("/", "-").replace(".", "-")
 
 
-def _find_latest_jsonl(project_dir: str) -> Path | None:
-    """Return the most recently modified top-level JSONL in the project's agent-transcripts."""
+def _find_session_jsonls(project_dir: str) -> list[Path]:
+    """Return top-level session JSONLs in the project's agent-transcripts, newest first."""
     encoded = _encode_cursor_path(project_dir)
     root = Path.home() / ".cursor" / "projects" / encoded / "agent-transcripts"
     if not root.exists():
         print(f"[cursor-dm-relay] no agent-transcripts dir at {root}", file=sys.stderr)
-        return None
+        return []
     # top-level only: <uuid>/<uuid>.jsonl (not subagents)
     candidates = [p for p in root.glob("*/*.jsonl") if p.parent.parent == root]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _find_latest_jsonl(project_dir: str) -> Path | None:
+    sessions = _find_session_jsonls(project_dir)
+    return sessions[0] if sessions else None
 
 
 def _session_id(p: Path) -> str:
@@ -266,7 +269,8 @@ def main() -> None:
         _tail(explicit_path, session_id)
         return
 
-    # Auto-discover mode: loop forever, picking up each new Cursor session.
+    # Auto-discover mode: poll for new Cursor sessions and tail each in the background.
+    # Tails must not block discovery — otherwise a finished chat prevents picking up the next one.
     print(f"[cursor-dm-relay] watching {project} for Cursor sessions...", file=sys.stderr)
     seen: set[str] = set()
 
@@ -274,21 +278,28 @@ def main() -> None:
         sys.exit(0)
     signal.signal(signal.SIGTERM, _handle_sig)
 
-    while True:
-        path = _find_latest_jsonl(project)
-        if path is None or _session_id(path) in seen:
-            time.sleep(2)
-            continue
-
+    def _attach_session(path: Path) -> None:
         session_id = _session_id(path)
-        seen.add(session_id)
         print(f"[cursor-dm-relay] new session: {session_id}", file=sys.stderr)
+        threading.Thread(
+            target=_watch_subagents,
+            args=(path.parent, session_id),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=_tail,
+            args=(path, session_id),
+            daemon=True,
+        ).start()
 
-        watcher = threading.Thread(target=_watch_subagents, args=(path.parent, session_id), daemon=True)
-        watcher.start()
-
-        # Tail runs in foreground — blocks until the session ends, then loops to pick up the next one.
-        _tail(path, session_id)
+    while True:
+        for path in _find_session_jsonls(project):
+            session_id = _session_id(path)
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            _attach_session(path)
+        time.sleep(2)
 
 
 if __name__ == "__main__":
