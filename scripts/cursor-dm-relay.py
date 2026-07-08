@@ -39,6 +39,10 @@ _BASE_URL   = os.environ.get("CLI_DM_URL", "http://localhost:8420")
 _TOKEN      = os.environ.get("CLI_DM_HOOK_TOKEN", "")
 _PROJECT    = os.environ.get("CLI_DM_CURSOR_PROJECT", os.getcwd())
 
+# Close tail loops when JSONL stops updating — otherwise SubagentStop/Stop never fires.
+_SUBAGENT_IDLE_SEC = int(os.environ.get("CLI_DM_SUBAGENT_IDLE_SEC", "120"))
+_SESSION_IDLE_SEC = int(os.environ.get("CLI_DM_SESSION_IDLE_SEC", "600"))
+
 # ---------------------------------------------------------------------------
 # Discovery helpers
 # ---------------------------------------------------------------------------
@@ -102,11 +106,37 @@ def _post(hook_type: str, payload: dict) -> None:
 # Core tail loop
 # ---------------------------------------------------------------------------
 
-def _relay_tool(session_id: str, name: str, tool_input: dict, tool_response: str = "") -> None:
+def _relay_tool(session_id: str, name: str, tool_input: dict, tool_response: str = "", tool_use_id: str = "") -> None:
     """Emit PreToolUse + PostToolUse for one tool invocation."""
     base = _hook_payload(session_id, tool_name=name, tool_input=tool_input)
+    if tool_use_id:
+        base["tool_use_id"] = tool_use_id
     _post("PreToolUse", base)
     _post("PostToolUse", {**base, "tool_response": tool_response[:2000]})
+
+def _peek_subagent_name(path: Path) -> str:
+    """Read agentName/description from the first lines of a subagent transcript."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(30):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                for key in ("agentName", "agent_name", "description", "slug"):
+                    val = entry.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()[:80]
+    except OSError:
+        pass
+    return "subagent"
+
 
 def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
     """Tail a Cursor JSONL and relay tool events to /api/hooks.
@@ -116,12 +146,15 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
     immediately; still handle tool_result when present (Claude-style transcripts).
     """
     is_sub = parent_id is not None
+    idle_sec = _SUBAGENT_IDLE_SEC if is_sub else _SESSION_IDLE_SEC
 
     if is_sub:
+        sub_name = _peek_subagent_name(path)
         _post("SubagentStart", _hook_payload(
             session_id,
             parent_session_id=parent_id,
             agent_id=session_id,
+            agent_name=sub_name,
         ))
     else:
         _post("SessionStart", _hook_payload(session_id))
@@ -129,6 +162,7 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
     # pending[tool_use_id] = {name, input} — for Claude-style tool_result pairing
     pending: dict[str, dict] = {}
     relayed: set[str] = set()
+    last_activity = time.time()
 
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -138,8 +172,11 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
             while True:
                 line = f.readline()
                 if not line:
+                    if time.time() - last_activity >= idle_sec:
+                        break
                     time.sleep(0.2)
                     continue
+                last_activity = time.time()
                 line = line.strip()
                 if not line:
                     continue
@@ -172,7 +209,7 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
                         }
                         pending[tid] = tool
                         # Cursor transcripts omit tool_result — relay on tool_use.
-                        _relay_tool(session_id, tool["name"], tool["input"])
+                        _relay_tool(session_id, tool["name"], tool["input"], tool_use_id=tid)
 
                 elif role == "user":
                     for block in content:
@@ -202,6 +239,7 @@ def _tail(path: Path, session_id: str, parent_id: str | None = None) -> None:
                             tool_name=tool["name"],
                             tool_input=tool["input"],
                             tool_response=str(result)[:2000],
+                            tool_use_id=tid,
                         ))
 
     except (KeyboardInterrupt, SystemExit):

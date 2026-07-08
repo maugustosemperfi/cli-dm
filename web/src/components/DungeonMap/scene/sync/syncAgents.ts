@@ -17,6 +17,55 @@ import type { SceneRefs } from "../sceneRefs";
 import type { LayoutResult } from "../../layout";
 import type { CorridorGraph } from "./syncSelection";
 
+/** Golden-angle spiral so many subagents fan out instead of stacking. */
+function subagentPosition(
+  parentX: number,
+  parentY: number,
+  siblingIndex: number,
+  agentId: string,
+): [number, number] {
+  if (siblingIndex <= 0) {
+    const hash = agentId.split("").reduce((h, c) => h * 31 + c.charCodeAt(0), 0);
+    const angle = (hash % 360) * (Math.PI / 180);
+    const dist = 32 + (hash % 18);
+    return [parentX + Math.cos(angle) * dist, parentY + Math.sin(angle) * dist];
+  }
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const angle = siblingIndex * goldenAngle;
+  const dist = 40 + Math.sqrt(siblingIndex) * 28;
+  return [parentX + Math.cos(angle) * dist, parentY + Math.sin(angle) * dist];
+}
+
+function groupSubagentsByParent(agents: Map<string, AgentState>): Map<string, string[]> {
+  const byParent = new Map<string, string[]>();
+  for (const agent of agents.values()) {
+    const colonIdx = agent.agentId.indexOf(":");
+    if (colonIdx <= 0) continue;
+    const parentId = agent.agentId.substring(0, colonIdx);
+    const list = byParent.get(parentId) ?? [];
+    list.push(agent.agentId);
+    byParent.set(parentId, list);
+  }
+  for (const list of byParent.values()) {
+    list.sort();
+  }
+  return byParent;
+}
+
+function unassignedRootAgents(
+  agents: Map<string, AgentState>,
+  dag: DAGSnapshot,
+): string[] {
+  const ids: string[] = [];
+  for (const agent of agents.values()) {
+    if (agent.agentId.includes(":")) continue;
+    if (dag.nodes.some((n) => n.assignee === agent.agentId)) continue;
+    ids.push(agent.agentId);
+  }
+  ids.sort();
+  return ids;
+}
+
 export function syncAgents(
   world: Container,
   refs: SceneRefs,
@@ -54,6 +103,14 @@ export function syncAgents(
   const CREATURE_COOLDOWN = 5000;
   const now = Date.now();
   const seenA = new Set<string>();
+  const subagentsByParent = groupSubagentsByParent(agents);
+  const orphanRoots = unassignedRootAgents(agents, dag);
+  const layoutCenter = layout.nodes.length > 0
+    ? {
+        x: layout.nodes.reduce((s, n) => s + n.x, 0) / layout.nodes.length,
+        y: layout.nodes.reduce((s, n) => s + n.y, 0) / layout.nodes.length + 100,
+      }
+    : { x: 400, y: 320 };
 
   for (const agent of agents.values()) {
     seenA.add(agent.agentId);
@@ -300,13 +357,10 @@ export function syncAgents(
         if (parentDn) {
           const parentLn = layout.nodes.find((n) => n.nodeId === parentDn.nodeId);
           if (parentLn) {
-            const hash = agent.agentId.split("").reduce((h, c) => h * 31 + c.charCodeAt(0), 0);
-            const angle = (hash % 360) * (Math.PI / 180);
-            const offsetDist = 20 + (hash % 30);
-            sp.moveTo(
-              parentLn.x + Math.cos(angle) * offsetDist,
-              parentLn.y + Math.sin(angle) * offsetDist,
-            );
+            const siblings = subagentsByParent.get(parentId) ?? [agent.agentId];
+            const siblingIndex = siblings.indexOf(agent.agentId);
+            const [sx, sy] = subagentPosition(parentLn.x, parentLn.y, siblingIndex, agent.agentId);
+            sp.moveTo(sx, sy);
 
             const neighborNodes: Array<{ nodeId: string; x: number; y: number }> = [];
             const addedNeighbors = new Set<string>();
@@ -348,6 +402,16 @@ export function syncAgents(
               );
             }
           }
+        }
+      } else {
+        const orphanIdx = orphanRoots.indexOf(agent.agentId);
+        if (orphanIdx >= 0) {
+          const angle = (orphanIdx / Math.max(orphanRoots.length, 1)) * Math.PI * 2;
+          const dist = 70 + orphanIdx * 12;
+          sp.moveTo(
+            layoutCenter.x + Math.cos(angle) * dist,
+            layoutCenter.y + Math.sin(angle) * dist,
+          );
         }
       }
     }

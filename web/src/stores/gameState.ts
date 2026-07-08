@@ -137,6 +137,9 @@ export interface AgentState extends AgentSnapshot {
   // Timestamp at which `isComplete` became true — used by the retention sweep
   // to evict long-dead agents from the scene without resetting RPG stats.
   completedAt?: number;
+  // When the agent first appeared — used to retire hook/relay agents that never
+  // received a proper agent.complete event.
+  spawnedAt?: number;
 }
 
 // Tool flow tracking — records action transitions between rooms for Sankey-style corridors
@@ -717,6 +720,7 @@ export const useGameState = create<GameState>((set, get) => ({
             totalTests: existing?.totalTests ?? 0,
             actionProfile: existing?.actionProfile ?? { recentActions: [], classType: 'paladin', classChangedAt: 0 },
             completedAt: existing?.completedAt,
+            spawnedAt: existing?.spawnedAt,
           });
         }
         draft.agents = agents;
@@ -750,6 +754,7 @@ export const useGameState = create<GameState>((set, get) => ({
           totalBuilds: 0,
           totalTests: 0,
           actionProfile: { recentActions: [], classType: 'paladin', classChangedAt: 0 },
+          spawnedAt: Date.now(),
         });
         draft.agents = agents;
         break;
@@ -1151,8 +1156,36 @@ const COMPLETED_RETENTION_MS = 30 * 60_000;
 const RETENTION_SWEEP_INTERVAL_MS = 60_000;
 const AUTO_PRUNE_INTERVAL_MS = 5 * 60_000;
 const AUTO_PRUNE_AGE_MINUTES = 30;
+// Hook/relay agents never emit Stop for finished subagents — retire them client-side.
+const ROOT_IDLE_COMPLETE_MS = 15 * 60_000;
+const SUBAGENT_IDLE_COMPLETE_MS = 3 * 60_000;
+const IDLE_COMPLETE_SWEEP_MS = 30_000;
 
 if (typeof window !== "undefined") {
+  setInterval(() => {
+    const { agents } = useGameState.getState();
+    const now = Date.now();
+    let next: Map<string, AgentState> | null = null;
+    for (const [id, a] of agents) {
+      if (a.isComplete) continue;
+      const isSub = id.includes(":");
+      const threshold = isSub ? SUBAGENT_IDLE_COMPLETE_MS : ROOT_IDLE_COMPLETE_MS;
+      const refTs = a.lastActiveTs || a.spawnedAt || 0;
+      if (refTs > 0 && now - refTs > threshold) {
+        if (!next) next = new Map(agents);
+        next.set(id, {
+          ...a,
+          isComplete: true,
+          currentAction: "idle",
+          completedAt: now,
+        });
+      }
+    }
+    if (next) {
+      useGameState.setState({ agents: next });
+    }
+  }, IDLE_COMPLETE_SWEEP_MS);
+
   setInterval(() => {
     const { agents } = useGameState.getState();
     const now = Date.now();

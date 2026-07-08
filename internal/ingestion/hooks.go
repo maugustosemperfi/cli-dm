@@ -286,30 +286,33 @@ func (h *HookReceiver) buildToolEvent(hookType string, payload map[string]any, a
 	switch hookType {
 	case "PreToolUse":
 		return &mapper.ToolEvent{
-			Kind:     mapper.ToolStart,
-			AgentID:  agentID,
-			ToolName: stringFromMap(payload, "tool_name"),
-			Input:    toInputMap(payload, "tool_input"),
+			Kind:      mapper.ToolStart,
+			AgentID:   agentID,
+			ToolName:  stringFromMap(payload, "tool_name"),
+			Input:     toInputMap(payload, "tool_input"),
+			ToolUseID: stringFromMap(payload, "tool_use_id"),
 		}
 
 	case "PostToolUse":
 		return &mapper.ToolEvent{
-			Kind:     mapper.ToolEnd,
-			AgentID:  agentID,
-			ToolName: stringFromMap(payload, "tool_name"),
-			Input:    toInputMap(payload, "tool_input"),
-			Output:   stringFromMap(payload, "tool_response"),
-			IsError:  false,
+			Kind:      mapper.ToolEnd,
+			AgentID:   agentID,
+			ToolName:  stringFromMap(payload, "tool_name"),
+			Input:     toInputMap(payload, "tool_input"),
+			Output:    stringFromMap(payload, "tool_response"),
+			IsError:   false,
+			ToolUseID: stringFromMap(payload, "tool_use_id"),
 		}
 
 	case "PostToolUseFailure":
 		return &mapper.ToolEvent{
-			Kind:     mapper.ToolError,
-			AgentID:  agentID,
-			ToolName: stringFromMap(payload, "tool_name"),
-			Input:    toInputMap(payload, "tool_input"),
-			Output:   stringFromMap(payload, "error"),
-			IsError:  true,
+			Kind:      mapper.ToolError,
+			AgentID:   agentID,
+			ToolName:  stringFromMap(payload, "tool_name"),
+			Input:     toInputMap(payload, "tool_input"),
+			Output:    stringFromMap(payload, "error"),
+			IsError:   true,
+			ToolUseID: stringFromMap(payload, "tool_use_id"),
 		}
 
 	case "SessionStart":
